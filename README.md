@@ -97,56 +97,7 @@ audit-trail/
 └── .github/workflows/ci.yml   # lint + 测试 + macOS/Windows 双端打包
 ```
 
-## 开发
 
-### 前端构建
-
-源码首次运行前先构建前端：
-
-```bash
-cd frontend-v3
-pnpm install --frozen-lockfile
-pnpm build
-cd ..
-.venv/bin/python main.py
-```
-
-启动日志会显示实际本地地址。前端构建产物缺失时，程序会明确提示先执行构建。
-
-### 交付门禁（每个任务完成必须全绿）
-
-```bash
-# 1. 静态检查
-ruff check .
-
-# 2. 全量回归
-python -m pytest tests/ -q
-
-# 3. 界面回归（首次需下载 Chromium）
-pnpm --dir frontend-v3 exec playwright install chromium
-E2E_PYTHON=.venv/bin/python pnpm --dir frontend-v3 test:e2e
-
-# 4. 验证配置
-hermes verify --json   # ok: true
-```
-
-### 打包
-
-**Windows 本地一键打包（推荐）**：双击项目根目录 `build-windows.bat`，自动完成 环境检查 → venv → 依赖 → 门禁(ruff+pytest) → PyInstaller → 发布清单 → 压缩安装包（版本+时间戳命名，不覆盖旧产物）→ 冒烟测试。
-
-**手动打包（macOS / Windows 同一命令）**：
-
-```bash
-pnpm --dir frontend-v3 install --frozen-lockfile
-pnpm --dir frontend-v3 build
-pip install pyinstaller
-pyinstaller --noconfirm 审迹.spec
-# macOS → dist/审迹.app
-# Windows → dist/审迹/（onedir：exe + _internal\ 整目录，分发时整体拷走）
-python scripts/release_manifest.py dist   # 生成版本 + sha256 清单
-```
-
-CI（`.github/workflows/ci.yml`）在每次 push 后自动完成 lint、测试与双端打包，产物在 Actions 页下载。
 
 ## 文档索引
 
@@ -157,8 +108,7 @@ CI（`.github/workflows/ci.yml`）在每次 push 后自动完成 lint、测试�
 
 ## 版本记录
 
-- **v1.0（正式版）**：前身「审计小助手」V3.2 功能冻结后正式发布，定名「审迹」。覆盖底稿编写、附件管理、复核流转、归档打包完整闭环，含项目目录伪装、问题分类、版本预览回溯、Excel 导入导出、健康检查、合并导入。
-- 后续优先方向：模板管理、批量重命名增强、局域网协同。
+- **v1.0（正式版）**：覆盖底稿编写、附件管理、复核流转、归档打包完整闭环，含项目目录伪装、问题分类、版本预览回溯、Excel 导入导出、健康检查、合并导入。
 
 ## License
 
