@@ -2,7 +2,7 @@
 
 > 本地离线运行的审计工作台 —— 底稿编写 · 附件管理 · 复核流转 · 归档打包，为专项审计现场设计。
 
-[![CI](https://github.com/qiqou/audit-tool/actions/workflows/ci.yml/badge.svg)](https://github.com/qiqou/audit-tool/actions/workflows/ci.yml)
+[![CI](https://github.com/qiqou/audit-trail/actions/workflows/ci.yml/badge.svg)](https://github.com/qiqou/audit-trail/actions/workflows/ci.yml)
 
 **审迹（Audit Trail）** 是一款本地离线运行的审计工作台：按「审计项目 → 被审计单位 → 底稿/附件」三级结构组织审计数据，覆盖底稿编写、附件管理、复核流转、归档打包全流程。数据全部存在项目文件夹内，拷贝文件夹即完成项目转移，不依赖云端。
 
@@ -26,7 +26,7 @@
 
 ### 方式一：打包版（推荐，免 Python 环境）
 
-从 [Releases](https://github.com/qiqou/audit-tool/releases) 下载对应平台的安装包：
+从 [Releases](https://github.com/qiqou/audit-trail/releases) 下载对应平台的安装包：
 
 - **macOS**：解压后双击 `审迹.app`
 - **Windows**：解压整个文件夹后双击 `审迹.exe`（onedir：exe 与 `_internal\` 目录须整体保留）
@@ -38,8 +38,8 @@
 需要 Python 3.11+：
 
 ```bash
-git clone https://github.com/qiqou/audit-tool.git
-cd audit-tool
+git clone https://github.com/qiqou/audit-trail.git
+cd audit-trail
 
 # macOS / Linux
 python3 -m venv .venv && source .venv/bin/activate
@@ -75,7 +75,7 @@ python main.py
 ## 项目结构
 
 ```
-audit-tool/
+audit-trail/
 ├── main.py                    # FastAPI 应用入口 + API 路由 + 启动生命周期
 ├── 审迹.spec                  # PyInstaller 双端统一构建配置
 ├── backend/
