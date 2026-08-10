@@ -6,7 +6,8 @@
 
 **审迹（Audit Trail）** 是一款本地离线运行的审计工作台：按「审计项目 → 被审计单位 → 底稿/附件」三级结构组织审计数据，覆盖底稿编写、附件管理、复核流转、归档打包全流程。数据全部存在项目文件夹内，拷贝文件夹即完成项目转移，不依赖云端。
 
-**v1.0 为正式版**：前身「审计小助手」V3.2 功能冻结后正式发布，工作流已覆盖专项审计现场完整闭环。
+<img width="2704" height="1424" alt="image" src="https://github.com/user-attachments/assets/6ed3b5c1-b445-4507-a610-d73ceca93476" />
+
 
 ## 特性
 
@@ -21,6 +22,8 @@
 | 🔀 合并导入 | 汇总多个备份/归档到当前项目，冲突自动处理并出具报告 |
 | 🔐 数据安全 | SQLite 事务写入、底稿版本快照、项目自包含（`.auditproj` 目录伪装防误删）、强制使用人留痕 |
 | 💻 跨平台 | macOS / Windows 双端打包（PyInstaller 统一 spec，GitHub Actions 自动构建） |
+
+<img width="2718" height="1506" alt="image" src="https://github.com/user-attachments/assets/9bdc35ae-7548-4191-a3fd-9577b2e8cbd4" />
 
 ## 快速开始
 
