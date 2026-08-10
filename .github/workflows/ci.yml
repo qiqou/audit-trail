@@ -1,0 +1,213 @@
+# 交付门禁：lint + 回归测试 + 双端打包冒烟（T10 统一 spec 构建）
+name: CI
+
+on:
+  push:
+    branches: [main, v1.1]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint-test:
+    # 2026-08 v3.1：临时关闭测试门禁，以出安装包为第一优先。
+    # 恢复测试：删除 if: false，并在 build-windows/build-macos 加回 needs: lint-test。
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "11.5.0"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 构建 V3 前端（类型检查 + 生产构建）
+        run: |
+          pnpm --dir frontend-v3 install --frozen-lockfile
+          pnpm --dir frontend-v3 build
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+      - name: 静态检查（ruff）
+        run: ruff check .
+      - name: 回归测试（pytest）
+        run: pytest tests/ -q --disable-warnings
+      - name: V3 工作台端到端回归
+        run: |
+          pnpm --dir frontend-v3 exec playwright install --with-deps chromium
+          E2E_PYTHON=python pnpm --dir frontend-v3 test:e2e
+
+  build-windows:
+    runs-on: windows-latest
+    # needs: lint-test  # 2026-08 v3.1 临时移除：出包优先，恢复测试时加回
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "11.5.0"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 构建 V3 前端
+        run: |
+          pnpm --dir frontend-v3 install --frozen-lockfile
+          pnpm --dir frontend-v3 build
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: 用 spec 打包（与 macOS 同一入口）
+        run: pyinstaller --noconfirm 审迹.spec
+      - name: 校验产物存在（onedir：exe 在子目录）
+        shell: bash
+        run: |
+          ls dist/
+          EXE_PATH=$(find dist/ -name "*.exe" | head -1)
+          test -n "$EXE_PATH"
+          echo "exe 存在: $EXE_PATH"
+      - name: 启动冒烟测试（发布阻断门禁）
+        shell: pwsh
+        run: |
+          $dir = Get-ChildItem dist\* -Directory | Where-Object { Test-Path (Join-Path $_.FullName "*.exe") } | Select-Object -First 1
+          $exe = Get-ChildItem (Join-Path $dir.FullName "*.exe") | Select-Object -First 1
+          Write-Host "冒烟测试: $($exe.FullName)"
+          $p = Start-Process -FilePath $exe.FullName -PassThru
+          $ok = $false
+          for ($i = 0; $i -lt 150; $i++) {
+            Start-Sleep -Seconds 1
+            if ($p.HasExited) { break }
+            $ports = @(Get-NetTCPConnection -OwningProcess $p.Id -State Listen -ErrorAction SilentlyContinue |
+              Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1') } |
+              Select-Object -ExpandProperty LocalPort -Unique)
+            foreach ($port in $ports) {
+              try {
+                $r = Invoke-WebRequest -Uri "http://127.0.0.1:$port/" -UseBasicParsing -TimeoutSec 2
+                if ($r.StatusCode -eq 200) { $ok = $true; break }
+              } catch {}
+            }
+            if ($ok) { break }
+            if ($i -eq 30) {
+              Write-Host "--- 30s 诊断 ---"
+              $p.Refresh()
+              Write-Host "进程存活: $(-not $p.HasExited)  主窗口标题: '$($p.MainWindowTitle)'"
+              Get-NetTCPConnection -OwningProcess $p.Id -State Listen -ErrorAction SilentlyContinue
+              $logDir = "$env:USERPROFILE\.shenji\logs"
+              if (Test-Path $logDir) {
+                Get-ChildItem $logDir | ForEach-Object { Write-Host "=== 崩溃日志 $($_.Name) ==="; Get-Content $_.FullName }
+              } else {
+                Write-Host "(无崩溃日志目录: $logDir)"
+              }
+            }
+          }
+          if (-not $ok) {
+            Write-Host "--- 最终取证 ---"
+            $p.Refresh()
+            Write-Host "进程已退出: $($p.HasExited)"
+            if ($p.HasExited) { Write-Host "exit code=$($p.ExitCode)" } else { Write-Host "主窗口标题: '$($p.MainWindowTitle)'" }
+            $logDir = "$env:USERPROFILE\.shenji\logs"
+            if (Test-Path $logDir) {
+              Get-ChildItem $logDir | ForEach-Object { Write-Host "=== 崩溃日志 $($_.Name) ==="; Get-Content $_.FullName }
+            } else {
+              Write-Host "(无崩溃日志目录: $logDir)"
+            }
+            Get-NetTCPConnection -OwningProcess $p.Id -State Listen -ErrorAction SilentlyContinue
+          }
+          if ($p.HasExited) {
+            Write-Host "exe 启动即退出, exit code=$($p.ExitCode)"
+            throw "exe 启动失败"
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { throw "服务未在 150 秒内就绪" }
+          Write-Host "冒烟测试通过: 服务 200 OK"
+      - name: 生成发布产物清单（版本 + sha256）
+        shell: bash
+        run: python scripts/release_manifest.py dist
+      - name: 压缩安装包目录（onedir 整目录 → zip）
+        # windows-latest 的 Git Bash 无 zip 命令（zip: command not found），
+        # 改用 Python zipfile 模块（setup-python 必有），跨平台稳定。
+        run: python -m zipfile -c "dist/审迹-windows.zip" "dist/审迹"
+      - name: 上传 Windows 安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: 审迹-windows
+          path: |
+            dist/审迹-windows.zip
+            dist/manifest.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  build-macos:
+    # 2026-08 v3.1：用户不需要 macOS 安装包，临时关闭（恢复时删除 if: false）。
+    if: false
+    runs-on: macos-latest
+    # needs: lint-test  # 2026-08 v3.1 临时移除：出包优先，恢复测试时加回
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "11.5.0"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 构建 V3 前端
+        run: |
+          pnpm --dir frontend-v3 install --frozen-lockfile
+          pnpm --dir frontend-v3 build
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: 用 spec 打包（与 Windows 同一入口）
+        run: pyinstaller --noconfirm 审迹.spec
+      - name: 校验产物存在
+        run: ls dist/ && test -d "dist/审迹.app"
+      - name: 启动冒烟测试（发布阻断门禁）
+        run: |
+          APP_BIN="dist/审迹.app/Contents/MacOS/审迹"
+          "$APP_BIN" > /tmp/audit-assistant-smoke.log 2>&1 &
+          APP_PID=$!
+          trap 'kill "$APP_PID" 2>/dev/null || true' EXIT
+          OK=0
+          for i in $(seq 1 150); do
+            if ! kill -0 "$APP_PID" 2>/dev/null; then
+              cat /tmp/audit-assistant-smoke.log
+              echo "应用启动即退出"
+              exit 1
+            fi
+            PORT=$(lsof -Pan -p "$APP_PID" -iTCP -sTCP:LISTEN 2>/dev/null | grep "127.0.0.1" | head -1 | sed -E 's/.*TCP 127\.0\.0\.1:([0-9]+).*/\1/')
+            if [ -n "$PORT" ] && curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/" >/dev/null; then
+              OK=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$OK" -ne 1 ]; then
+            cat /tmp/audit-assistant-smoke.log
+            echo "服务未在 150 秒内就绪"
+            exit 1
+          fi
+          echo "macOS 冒烟测试通过: 服务 200 OK"
+      - name: 生成发布产物清单（版本 + sha256）
+        run: python scripts/release_manifest.py dist
+      - name: 压缩 .app（上传为 zip）
+        run: |
+          cd dist && ditto -c -k --sequesterRsrc --keepParent "审迹.app" "审迹-macos.zip"
+      - name: 上传 macOS 安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: 审迹-macos
+          path: |
+            dist/审迹-macos.zip
+            dist/manifest.txt
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,23 @@
+[tool.ruff]
+# 交付门禁：本地工具静态检查（审查 F-08 修复）
+# 保留基础规则 + import 排序；豁免本地工具的项目惯用模式：
+#   B008    FastAPI File()/Form() 默认参数是标准写法
+#   BLE001  顶层裸 except 转 HTTP 400 是本项目错误处理模式
+#   DTZ005  本地离线工具使用本地时间（无时区业务）
+#   RUF013  隐式 Optional 是既有代码风格
+#   S110    关闭资源/清理临时文件时静默异常可接受
+#   ASYNC230 本地小文件流式写入，阻塞可接受
+line-length = 120
+target-version = "py311"
+exclude = ["历史半成品"]
+
+[tool.ruff.lint]
+extend-select = ["I"]
+ignore = [
+    "ASYNC230",
+    "B008",
+    "BLE001",
+    "DTZ005",
+    "RUF013",
+    "S110",
+]

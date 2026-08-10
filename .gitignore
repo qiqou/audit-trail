@@ -1,0 +1,28 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# 构建产物
+build/
+dist/
+# *.spec 保留在仓库（可复现构建），仅忽略构建中间文件
+
+# 测试临时数据（验收脚本生成的临时项目）
+scripts/__pycache__/
+.pytest_cache/
+.ruff_cache/
+
+# git worktree 元数据（linked worktree 工作区）
+.worktrees/
+
+# Hermes 工具生成物（verify recipe 记录，非项目源码）
+.hermes/
+
+# Vite 前端构建和依赖（源码、锁文件保留）
+frontend-v3/dist/
+frontend-v3/node_modules/
