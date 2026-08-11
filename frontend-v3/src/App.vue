@@ -12,7 +12,8 @@ type AutoSaveMode = "realtime" | "5m" | "20m";
 const RECENT_KEY = "audit_recent_projects";
 const AUTO_SAVE_KEY = "audit_auto_save_mode_v3";
 
-function loadRecent(): RecentProject[] {
+function loadRecentLocal(): RecentProject[] {
+  // localStorage 仅作降级兜底（后端不可用时的静态读取；正式记录走后端 /api/recent）
   try {
     const value = JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]");
     return Array.isArray(value)
@@ -20,6 +21,17 @@ function loadRecent(): RecentProject[] {
       : [];
   } catch {
     return [];
+  }
+}
+
+async function refreshRecent(): Promise<void> {
+  try {
+    const items = (await api.recent()).items;
+    recentProjects.value = items
+      .filter((item): item is RecentProject => Boolean(item?.path && item?.name))
+      .slice(0, 20);
+  } catch {
+    recentProjects.value = loadRecentLocal();
   }
 }
 
@@ -36,7 +48,7 @@ const projectPath = ref("");
 const projectName = ref("");
 const health = ref<HealthResult | null>(null);
 const busy = ref(false);
-const recentProjects = ref<RecentProject[]>(loadRecent());
+const recentProjects = ref<RecentProject[]>(loadRecentLocal());
 type Theme = "dark" | "light" | "green";
 const storedTheme = localStorage.getItem("audit_theme");
 const theme = ref<Theme>(storedTheme === "light" || storedTheme === "green" || storedTheme === "dark" ? storedTheme : "dark");
@@ -46,7 +58,7 @@ const autoSaveMode = ref<AutoSaveMode>(
     ? storedAutoSaveMode
     : "5m",
 );
-const workspace = ref<{ confirmCurrentLeave: () => Promise<boolean> } | null>(null);
+const workspace = ref<{ confirmCurrentLeave: () => Promise<boolean>; selectIssueById: (issueId: number) => Promise<void>; selectUnit: (unitId: number) => void } | null>(null);
 
 const loggedIn = computed(() => Boolean(operator.value));
 
@@ -63,15 +75,13 @@ function report(error: unknown): void {
   ElMessage.error(error instanceof Error ? error.message : "操作失败，请重试");
 }
 
-function rememberRecent(value: ProjectInfo): void {
-  const item: RecentProject = { path: value.path, name: value.project_name, time: Date.now() };
-  recentProjects.value = [item, ...recentProjects.value.filter((project) => project.path !== item.path)].slice(0, 20);
-  localStorage.setItem(RECENT_KEY, JSON.stringify(recentProjects.value));
-}
-
-function forgetRecent(path: string): void {
-  recentProjects.value = recentProjects.value.filter((project) => project.path !== path);
-  localStorage.setItem(RECENT_KEY, JSON.stringify(recentProjects.value));
+async function forgetRecent(path: string): Promise<void> {
+  try {
+    await api.forgetRecent(path);
+    recentProjects.value = recentProjects.value.filter((project) => project.path !== path);
+  } catch (error) {
+    report(error);
+  }
 }
 
 async function deleteProject(recent: RecentProject): Promise<void> {
@@ -86,8 +96,7 @@ async function deleteProject(recent: RecentProject): Promise<void> {
   }
   try {
     await api.deleteProject(recent.path);
-    recentProjects.value = recentProjects.value.filter((item) => item.path !== recent.path);
-    localStorage.setItem(RECENT_KEY, JSON.stringify(recentProjects.value));
+    await refreshRecent(); // 后端删除项目时已自动移除最近记录
     if (project.value?.path === recent.path) {
       backToProjectList(true); // 项目已删除，强制返回项目列表（跳过未保存确认）
     }
@@ -109,6 +118,7 @@ async function login(): Promise<void> {
   busy.value = true;
   try {
     operator.value = (await api.login(loginName.value.trim())).operator;
+    await refreshRecent();
     ElMessage.success(`欢迎，${operator.value}`);
   } catch (error) {
     report(error);
@@ -186,7 +196,7 @@ async function setProject(action: "open" | "create"): Promise<void> {
       ? await api.openProject(projectPath.value.trim())
       : await api.createProject(projectPath.value.trim(), projectName.value.trim());
     await Promise.all([refreshUnits(), refreshDepartments(), refreshCategories(), refreshIssueNumber()]);
-    rememberRecent(project.value);
+    await refreshRecent(); // 后端打开/创建时已自动记录
     health.value = null;
     ElMessage.success(action === "open" ? "项目已打开" : "项目已创建");
   } catch (error) {
@@ -202,7 +212,7 @@ async function openRecent(recent: RecentProject): Promise<void> {
   try {
     project.value = await api.openProject(recent.path);
     await Promise.all([refreshUnits(), refreshDepartments(), refreshCategories(), refreshIssueNumber()]);
-    rememberRecent(project.value);
+    await refreshRecent(); // 后端打开时已自动更新记录时间
     health.value = null;
     ElMessage.success(`已打开“${project.value.project_name}”`);
   } catch (error) {
@@ -272,7 +282,7 @@ async function openRestoredProject(path: string): Promise<void> {
   try {
     project.value = await api.openProject(path);
     await Promise.all([refreshUnits(), refreshDepartments(), refreshCategories(), refreshIssueNumber()]);
-    rememberRecent(project.value);
+    await refreshRecent(); // 后端打开时已自动记录
     health.value = null;
   } catch (error) {
     report(error);
@@ -281,7 +291,15 @@ async function openRestoredProject(path: string): Promise<void> {
 
 function projectRenamed(value: ProjectInfo): void {
   project.value = value;
-  rememberRecent(value);
+  void refreshRecent(); // 后端重命名时已自动更新记录名称
+}
+
+function handleOpenIssue(issueId: number): void {
+  void workspace.value?.selectIssueById(issueId);
+}
+
+function handleSelectUnit(unitId: number): void {
+  workspace.value?.selectUnit(unitId);
 }
 
 async function backToProjectList(force = false): Promise<void> {
@@ -340,6 +358,7 @@ async function validateStoredSession(): Promise<void> {
 onMounted(() => {
   window.addEventListener("audit-session-expired", handleSessionExpired);
   void validateStoredSession();
+  void refreshRecent(); // 会话恢复场景：登录态存在时拉取后端最近列表
 });
 onBeforeUnmount(() => window.removeEventListener("audit-session-expired", handleSessionExpired));
 </script>
@@ -347,7 +366,7 @@ onBeforeUnmount(() => window.removeEventListener("audit-session-expired", handle
 <template>
   <main class="app-shell">
     <section v-if="!loggedIn" class="login-card">
-      <p class="eyebrow">AUDIT TRAIL 1.0</p>
+      <p class="eyebrow">AUDIT TRAIL 1.1</p>
       <h1>审迹</h1>
       <p>离线专项审计底稿与证据归档工具</p>
       <el-input v-model="loginName" size="large" placeholder="使用人姓名" @keyup.enter="login" />
@@ -357,10 +376,10 @@ onBeforeUnmount(() => window.removeEventListener("audit-session-expired", handle
 
     <template v-else>
       <header class="topbar">
-        <div><p class="eyebrow">AUDIT TRAIL 1.0</p><h1>{{ project?.project_name || '审计工作台' }}</h1><p v-if="project" class="topbar-path">{{ project.path }}</p></div>
+        <div><p class="eyebrow">AUDIT TRAIL 1.1</p><h1>{{ project?.project_name || '审计工作台' }}</h1><p v-if="project" class="topbar-path">{{ project.path }}</p></div>
         <div class="operator">
           <el-button v-if="project" size="small" @click="backToProjectList">◀ 返回项目列表</el-button>
-          <ProjectOperations v-if="project" :units="units" :departments="departments" :categories="categories" :project-name="project.project_name" :auto-save-mode="autoSaveMode" :issue-number-rule="issueNumberRule" @health-check="runHealthCheck" @data-changed="refreshUnits" @departments-changed="departmentsSaved" @categories-changed="categoriesSaved" @auto-save-mode-changed="autoSaveModeChanged" @project-renamed="projectRenamed" @restored="openRestoredProject" @issue-number-changed="issueNumberChanged" />
+          <ProjectOperations v-if="project" :units="units" :departments="departments" :categories="categories" :project-name="project.project_name" :auto-save-mode="autoSaveMode" :issue-number-rule="issueNumberRule" @health-check="runHealthCheck" @data-changed="refreshUnits" @departments-changed="departmentsSaved" @categories-changed="categoriesSaved" @auto-save-mode-changed="autoSaveModeChanged" @project-renamed="projectRenamed" @restored="openRestoredProject" @issue-number-changed="issueNumberChanged" @open-issue="handleOpenIssue" @select-unit="handleSelectUnit" />
           <span class="theme-switch" aria-label="界面主题">
             <button class="theme-dot" :class="{ active: theme === 'dark' }" title="深色" @click="applyTheme('dark')">🌙</button>
             <button class="theme-dot" :class="{ active: theme === 'light' }" title="浅色" @click="applyTheme('light')">☀️</button>

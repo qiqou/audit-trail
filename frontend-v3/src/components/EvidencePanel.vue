@@ -94,10 +94,10 @@ async function uploadFiles(files: File[]): Promise<void> {
     for (const file of files) {
       const response = await api.uploadFile(props.issue.unit_id, file);
       const evidence = "duplicated" in response ? response.file : response;
-      await api.linkFile(props.issue.id, evidence.id);
+      await api.linkFileExclusive(props.issue.id, evidence.id);
       complete += 1;
     }
-    ElMessage.success(`已导入并关联 ${complete} 个附件`);
+    ElMessage.success(`已导入并仅关联到当前底稿 ${complete} 个附件`);
   } catch (error) {
     report(error);
   } finally {
@@ -119,10 +119,15 @@ async function uploadFolderItems(folderName: string, files: Array<File | FolderU
   uploading.value = true;
   let changed = false;
   try {
-    const folder = await api.uploadFolder(props.issue.unit_id, folderName, files);
-    await api.linkFile(props.issue.id, folder.id);
+    const response = await api.uploadFolder(props.issue.unit_id, folderName, files);
+    const folder = "duplicated" in response ? response.file : response;
+    await api.linkFileExclusive(props.issue.id, folder.id);
     changed = true;
-    ElMessage.success(`文件夹“${folderName}”已作为证据实体导入并关联`);
+    ElMessage.success(
+      "duplicated" in response
+        ? `文件夹“${folderName}”与已有文件夹内容一致，已复用并仅关联到当前底稿`
+        : `文件夹“${folderName}”已作为证据实体导入并仅关联到当前底稿`,
+    );
   } catch (error) {
     report(error);
   } finally {
@@ -247,13 +252,12 @@ async function onPaste(event: ClipboardEvent): Promise<void> {
   await uploadFiles(files.map(clipboardName));
 }
 
-async function link(file: EvidenceFile, exclusive = false): Promise<void> {
+async function link(file: EvidenceFile): Promise<void> {
   try {
-    if (exclusive) await api.linkFileExclusive(props.issue.id, file.id);
-    else await api.linkFile(props.issue.id, file.id);
+    await api.linkFile(props.issue.id, file.id);
     await load();
     emit("changed");
-    ElMessage.success(exclusive ? "已仅关联到当前底稿" : "已关联附件");
+    ElMessage.success("已关联附件");
   } catch (error) {
     report(error);
   }
@@ -284,16 +288,35 @@ async function rename(file: EvidenceFile): Promise<void> {
   }
 }
 
-async function toggleShared(file: EvidenceFile): Promise<void> {
+async function shareFile(file: EvidenceFile): Promise<void> {
   try {
-    if (file.exclusive_to) {
-      await api.makeFileShared(file.id);
-      ElMessage.success("附件已恢复为共享资料");
-    } else {
-      await api.linkFileExclusive(props.issue.id, file.id);
-      ElMessage.success("附件已仅关联当前底稿");
-    }
+    await api.makeFileShared(file.id);
+    ElMessage.success("已共享到本单位资料库，同单位其他底稿可见");
     await load();
+  } catch (error) {
+    report(error);
+  }
+}
+
+async function unshareFile(file: EvidenceFile): Promise<void> {
+  // ref_count = 该附件被全部底稿引用的总数（含当前底稿），>1 即还有其他底稿引用
+  const others = Math.max((file.ref_count ?? 1) - 1, 0);
+  try {
+    if (others > 0) {
+      await ElMessageBox.confirm(
+        `该附件已被其他 ${others} 个底稿引用。取消共享将解除这些底稿的关联，附件仅保留在当前底稿。确定继续？`,
+        "取消共享",
+        { type: "warning", confirmButtonText: "取消共享", cancelButtonText: "取消" },
+      );
+    }
+  } catch {
+    return; // 用户取消
+  }
+  try {
+    await api.linkFileExclusive(props.issue.id, file.id);
+    await load();
+    emit("changed");
+    ElMessage.success(others > 0 ? `已取消共享，并解除其他 ${others} 个底稿的引用` : "已取消共享，附件仅关联当前底稿");
   } catch (error) {
     report(error);
   }
@@ -372,6 +395,24 @@ async function openAttachmentDirectory(unitId = props.issue.unit_id): Promise<vo
   try {
     await api.openUnitAttachmentDirectory(unitId);
     ElMessage.success("已在系统文件管理器中打开附件目录");
+  } catch (error) {
+    report(error);
+  }
+}
+
+async function openFile(file: EvidenceFile): Promise<void> {
+  if (file.mime === "folder") {
+    try {
+      await api.openEvidenceFolder(file.id);
+      ElMessage.success("已在系统文件管理器中打开证据目录");
+    } catch (error) {
+      report(error);
+    }
+    return;
+  }
+  try {
+    await api.openFile(file.id);
+    ElMessage.success("已用系统默认程序打开附件");
   } catch (error) {
     report(error);
   }
@@ -470,12 +511,13 @@ function evidenceCommand(command: string): void {
 }
 
 function fileCommand(file: EvidenceFile, command: string): void {
+  if (command === "open") void openFile(file);
   if (command === "download") void download(file);
   if (command === "rename") void rename(file);
   if (command === "references") void showReferences(file);
   if (command === "move") startMove([file]);
-  if (command === "shared") void toggleShared(file);
-  if (command === "exclusive") void link(file, true);
+  if (command === "shared") void shareFile(file);
+  if (command === "unshare") void unshareFile(file);
   if (command === "delete") void remove(file);
 }
 </script>
@@ -490,9 +532,9 @@ function fileCommand(file: EvidenceFile, command: string): void {
     <div v-if="selectedFiles.length" class="batch-bar"><strong>已选 {{ selectedFiles.length }} 项</strong><el-button text size="small" @click="batchLink">批量关联</el-button><el-button text size="small" @click="batchUnlink">批量解除</el-button><el-button text size="small" @click="openBatchRename">批量重命名</el-button><el-button text size="small" @click="startMove(selectedFiles)">批量移动</el-button><el-button text type="danger" size="small" @click="batchDelete">批量删除</el-button><el-button text size="small" @click="clearSelection">取消选择</el-button></div>
     <div class="evidence-subhead"><h3>当前底稿附件（{{ attached.length }}）</h3><span class="selection-tools"><el-button text size="small" :disabled="!attached.length" @click="selectAll(attached)">全选</el-button><el-button text size="small" :disabled="!attached.length" @click="invertSelection(attached)">反选</el-button></span></div>
     <el-empty v-if="!attached.length" description="尚未关联附件" :image-size="58" />
-    <div v-else class="file-list compact-file-list"><div v-for="file in attached" :key="file.id" class="file-row compact-file-row"><input class="file-check" type="checkbox" :checked="isSelected(file)" :aria-label="`选择 ${file.orig_name}`" @change="setSelected(file, ($event.target as HTMLInputElement).checked)" /><span class="file-icon" aria-hidden="true">{{ file.mime === 'folder' ? '📁' : '📎' }}</span><div class="file-info"><strong :title="file.orig_name">{{ file.orig_name }}</strong></div><div class="file-row-tail"><el-dropdown trigger="click" @command="(command: string) => fileCommand(file, command)"><el-button text size="small">更多 ▾</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="download">{{ file.mime === 'folder' ? '查看目录' : '下载' }}</el-dropdown-item><el-dropdown-item command="rename">重命名</el-dropdown-item><el-dropdown-item command="references">查看引用</el-dropdown-item><el-dropdown-item command="move">移动到单位</el-dropdown-item><el-dropdown-item command="shared">{{ file.exclusive_to ? '恢复为共享附件' : '设为仅关联当前底稿' }}</el-dropdown-item></el-dropdown-menu></template></el-dropdown><el-button text type="danger" size="small" @click="unlink(file)">取消关联</el-button></div></div></div>
+    <div v-else class="file-list compact-file-list"><div v-for="file in attached" :key="file.id" class="file-row compact-file-row"><input class="file-check" type="checkbox" :checked="isSelected(file)" :aria-label="`选择 ${file.orig_name}`" @change="setSelected(file, ($event.target as HTMLInputElement).checked)" /><span class="file-icon" aria-hidden="true">{{ file.mime === 'folder' ? '📁' : '📎' }}</span><div class="file-info"><strong :title="file.orig_name">{{ file.orig_name }}</strong></div><div class="file-row-tail"><el-dropdown split-button trigger="click" type="danger" size="small" @click="unlink(file)" @command="(command: string) => fileCommand(file, command)">取消关联<template #dropdown><el-dropdown-menu><el-dropdown-item command="open">{{ file.mime === 'folder' ? '打开目录' : '打开' }}</el-dropdown-item><el-dropdown-item v-if="file.mime !== 'folder'" command="download">下载</el-dropdown-item><el-dropdown-item command="rename">重命名</el-dropdown-item><el-dropdown-item command="references">查看引用</el-dropdown-item><el-dropdown-item command="move">移动到单位</el-dropdown-item><el-dropdown-item v-if="file.exclusive_to" command="shared">共享此附件</el-dropdown-item><el-dropdown-item v-else command="unshare">取消共享</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></div></div>
     <div class="evidence-subhead"><h3>本单位资料库（{{ available.length }}）</h3><span class="selection-tools"><el-button text size="small" :disabled="!available.length" @click="selectAll(available)">全选</el-button><el-button text size="small" :disabled="!available.length" @click="invertSelection(available)">反选</el-button><el-button text size="small" @click="libraryExpanded = !libraryExpanded">{{ libraryExpanded ? '收起' : '展开' }}</el-button></span></div>
-    <template v-if="libraryExpanded"><el-empty v-if="!available.length" description="没有可关联的共享附件" :image-size="58" /><div v-else class="file-list compact-file-list"><div v-for="file in available" :key="file.id" class="file-row compact-file-row"><input class="file-check" type="checkbox" :checked="isSelected(file)" :aria-label="`选择 ${file.orig_name}`" @change="setSelected(file, ($event.target as HTMLInputElement).checked)" /><span class="file-icon" aria-hidden="true">{{ file.mime === 'folder' ? '📁' : '📎' }}</span><div class="file-info"><strong :title="file.orig_name">{{ file.orig_name }}</strong></div><div class="file-row-tail"><el-dropdown trigger="click" @command="(command: string) => fileCommand(file, command)"><el-button text size="small">更多 ▾</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="download">{{ file.mime === 'folder' ? '查看目录' : '下载' }}</el-dropdown-item><el-dropdown-item command="rename">重命名</el-dropdown-item><el-dropdown-item command="references">查看引用</el-dropdown-item><el-dropdown-item command="move">移动到单位</el-dropdown-item><el-dropdown-item command="exclusive">仅关联到当前底稿</el-dropdown-item><el-dropdown-item divided command="delete">删除附件</el-dropdown-item></el-dropdown-menu></template></el-dropdown><el-button text type="primary" size="small" @click="link(file)">关联</el-button></div></div></div></template>
+    <template v-if="libraryExpanded"><el-empty v-if="!available.length" description="没有可关联的共享附件" :image-size="58" /><div v-else class="file-list compact-file-list"><div v-for="file in available" :key="file.id" class="file-row compact-file-row"><input class="file-check" type="checkbox" :checked="isSelected(file)" :aria-label="`选择 ${file.orig_name}`" @change="setSelected(file, ($event.target as HTMLInputElement).checked)" /><span class="file-icon" aria-hidden="true">{{ file.mime === 'folder' ? '📁' : '📎' }}</span><div class="file-info"><strong :title="file.orig_name">{{ file.orig_name }}</strong></div><div class="file-row-tail"><el-dropdown split-button trigger="click" type="primary" size="small" @click="link(file)" @command="(command: string) => fileCommand(file, command)">关联<template #dropdown><el-dropdown-menu><el-dropdown-item command="open">{{ file.mime === 'folder' ? '打开目录' : '打开' }}</el-dropdown-item><el-dropdown-item v-if="file.mime !== 'folder'" command="download">下载</el-dropdown-item><el-dropdown-item command="rename">重命名</el-dropdown-item><el-dropdown-item command="references">查看引用</el-dropdown-item><el-dropdown-item command="move">移动到单位</el-dropdown-item><el-dropdown-item divided command="delete">删除附件</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></div></div></template>
 
     <div v-if="movingFiles.length" class="inline-panel"><strong>移动 {{ movingFiles.length }} 个附件</strong><el-select v-model="moveTarget" placeholder="目标单位"><el-option v-for="unit in units" :key="unit.id" :value="unit.id" :label="unit.name" /></el-select><div><el-button size="small" @click="movingFiles = []">取消</el-button><el-button size="small" type="primary" @click="move">确认移动</el-button></div></div>
     <div v-if="batchRenameItems.length" class="inline-panel"><div class="panel-head"><strong>批量重命名（{{ batchRenameItems.length }} 项）</strong><el-button text size="small" @click="batchRenameItems = []">关闭</el-button></div><div class="batch-rename-list"><el-input v-for="item in batchRenameItems" :key="item.id" v-model="item.name" /></div><div><el-button size="small" @click="batchRenameItems = []">取消</el-button><el-button size="small" type="primary" @click="saveBatchRename">保存重命名</el-button></div></div>

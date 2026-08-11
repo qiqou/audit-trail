@@ -22,3 +22,12 @@ def proj(tmp_path):
     p = AuditProject(tmp_path / "测试项目")
     yield p
     p.close()
+
+
+@pytest.fixture(autouse=True)
+def isolated_config_dir(tmp_path, monkeypatch):
+    """隔离 ~/.shenji 配置目录：最近项目记录等运行时状态写入临时目录，不污染本机。"""
+    import platform_adapter
+
+    monkeypatch.setattr(platform_adapter, "CONFIG_DIR", tmp_path / ".shenji")
+    yield

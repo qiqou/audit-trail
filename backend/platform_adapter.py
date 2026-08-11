@@ -22,12 +22,16 @@ import os
 import socket
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 # 程序配置目录（与数据库无关的运行时状态，如单实例锁）
 CONFIG_DIR = Path.home() / ".shenji"
 LOCK_FILE = "shenji.lock"
 ENDPOINT_FILE = "shenji.endpoint.json"
+RECENT_FILE = "recent_projects.json"
+_RECENT_LOCK = threading.Lock()
 
 
 class PlatformError(Exception):
@@ -80,7 +84,7 @@ def open_path(p) -> None:
     """在系统文件管理器中打开路径（macOS Finder / Windows 资源管理器）。"""
     target = Path(p).expanduser()
     if not target.exists():
-        raise PlatformError(f"文件夹不存在：{target}。请确认路径后重试")
+        raise PlatformError(f"路径不存在：{target}。请确认路径后重试")
     try:
         if _is_darwin():
             subprocess.Popen(["open", str(target)])
@@ -106,6 +110,57 @@ def open_browser(url: str) -> None:
             raise OSError("系统未接受浏览器打开请求")
     except Exception as e:
         raise PlatformError(f"自动打开浏览器失败：{e}。请手动访问 {url}") from e
+
+
+def load_recent_all() -> dict:
+    """读取全部使用人的最近项目记录（JSON: {operator: [items]}，损坏时返回空）。"""
+    try:
+        return json.loads((CONFIG_DIR / RECENT_FILE).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_recent_all(data: dict) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = CONFIG_DIR / f"{RECENT_FILE}.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, CONFIG_DIR / RECENT_FILE)
+
+
+def remember_recent(operator: str, path: str, name: str, limit: int = 20) -> None:
+    """记录最近打开/创建的项目（按使用人隔离，最新在前，最多 limit 条）。
+
+    path 相同视为同一项目（重命名时更新名称与时间）。写失败静默——
+    本地快捷记录不阻塞项目打开。
+    """
+    if not operator or not path or not name:
+        return
+    with _RECENT_LOCK:
+        data = load_recent_all()
+        items = [it for it in data.get(operator, []) if isinstance(it, dict) and it.get("path") != path]
+        items.insert(0, {"path": path, "name": name, "time": int(time.time() * 1000)})
+        data[operator] = items[:limit]
+        try:
+            _save_recent_all(data)
+        except OSError:
+            pass
+
+
+def forget_recent(operator: str, path: str) -> None:
+    """从最近记录中移除指定项目（不移除磁盘上的项目）。"""
+    if not operator or not path:
+        return
+    with _RECENT_LOCK:
+        data = load_recent_all()
+        items = data.get(operator, [])
+        kept = [it for it in items if isinstance(it, dict) and it.get("path") != path]
+        if len(kept) == len(items):
+            return
+        data[operator] = kept
+        try:
+            _save_recent_all(data)
+        except OSError:
+            pass
 
 
 def write_instance_endpoint(host: str, port: int, name: str = LOCK_FILE) -> None:

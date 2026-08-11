@@ -90,3 +90,28 @@ h1, h2 { margin: 0; color: var(--text); } h1 { font-size: 22px; } h2 { font-size
 
 @media (max-width: 1280px) { body { min-width: 0; }.app-shell { width: min(100% - 24px, 1080px); }.workspace { grid-template-columns: 260px minmax(0, 1fr); }.workspace > .evidence { grid-column: 2; height: auto; min-height: 0; }.workspace > .panel { height: auto; max-height: none; }.issue-list { position: static; }.empty-editor { grid-column: 2; }.form-grid { grid-template-columns: 1fr 1fr; }.workspace-resizer { display: none; } }
 @media (max-width: 800px) { .topbar { align-items: flex-start; flex-direction: column; }.operator { justify-content: flex-start; }.project-hub, .summary-grid { grid-template-columns: 1fr; }.project-hub { margin-top: 28px; }.log-row { grid-template-columns: 1fr 1fr; }.workspace { grid-template-columns: 1fr; }.workspace > .evidence, .empty-editor { grid-column: 1; }.form-grid { grid-template-columns: 1fr; } }
+
+/* 附件行 split 按钮：取消填充色，紧凑文本风格（跟随主题变量） */
+.file-row-tail .el-button-group { flex-wrap: nowrap; }
+.file-row-tail .el-button-group .el-button {
+  margin-left: 0;
+  padding: 3px 7px;
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+.file-row-tail .el-button-group .el-button:hover { background: var(--el-fill-color-light); }
+.file-row-tail .el-button-group .el-button--primary { color: var(--el-color-primary); }
+.file-row-tail .el-button-group .el-button--primary:hover { color: var(--accent-2); }
+.file-row-tail .el-button-group .el-button--danger { color: var(--danger); }
+.file-row-tail .el-button-group .el-button--danger:hover { color: var(--danger); }
+.file-row-tail .el-button-group .el-dropdown__caret-button { padding-left: 3px; padding-right: 4px; }
+.file-row-tail .el-button-group .el-dropdown__caret-button .el-icon { font-size: 11px; }
+
+/* 问题清单视图（升级项目汇总）与全局搜索 */
+.summary-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }.summary-filters select { min-width: 150px; padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); color: var(--text); }
+.issue-table-head, .issue-table-row { display: grid; grid-template-columns: 64px minmax(110px, 1.2fr) minmax(90px, 1fr) minmax(150px, 2fr) minmax(100px, 1.1fr) 76px; gap: 14px; align-items: center; }
+.issue-table-head { padding: 5px 8px; color: var(--text-dim); font-size: 12px; border-bottom: 1px solid var(--border); }.issue-table { max-height: 46vh; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+.issue-table-row { padding: 6px 8px; border-bottom: 1px solid var(--border); color: var(--text); cursor: pointer; }.issue-table-row:last-child { border-bottom: 0; }.issue-table-row:hover { background: var(--panel-2); }.issue-table-row .defect { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.issue-table-head .num, .issue-table-row .num { text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.issue-table-row .status { color: var(--text-dim); font-size: 12px; }
+.search-results { display: grid; gap: 10px; margin-top: 10px; max-height: 60vh; overflow: auto; }.search-results section h3 { margin: 6px 0 4px; color: var(--text-dim); font-size: 12px; }.search-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 9px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel-2); cursor: pointer; }.search-row:hover { border-color: var(--accent); }.search-row small { color: var(--text-dim); font-size: 12px; }
+

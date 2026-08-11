@@ -4,6 +4,12 @@ export interface ProjectInfo {
   units: Unit[];
 }
 
+export interface RecentProjectItem {
+  path: string;
+  name: string;
+  time: number;
+}
+
 export interface Unit {
   id: number;
   name: string;
@@ -18,11 +24,33 @@ export interface HealthResult {
   problems: Array<{ type: string; severity: string; message: string }>;
 }
 
+export interface SummaryIssue {
+  id: number;
+  seq: number;
+  unit_id: number;
+  unit_name: string;
+  department: string;
+  defect_type: string;
+  category: string;
+  amount: string;
+  status: string;
+  author: string;
+  reviewer: string;
+  file_count: number;
+}
+
 export interface ProjectSummary {
   total: number;
   by_status: Record<string, number>;
   by_dept: Record<string, number>;
   by_unit: Record<string, { issues: number; files: number }>;
+  issues: SummaryIssue[];
+}
+
+export interface SearchResult {
+  units: { id: number; name: string }[];
+  issues: SummaryIssue[];
+  files: { id: number; unit_id: number; unit_name: string; orig_name: string; mime: string; exclusive_to: number | null; rel_path: string }[];
 }
 
 export interface AuditLog {
@@ -225,6 +253,14 @@ class ApiClient {
     return this.request("/api/project/rename", { method: "POST", body: JSON.stringify({ name }) });
   }
 
+  recent(): Promise<{ items: RecentProjectItem[] }> {
+    return this.request("/api/recent");
+  }
+
+  forgetRecent(path: string): Promise<{ ok: boolean }> {
+    return this.request(`/api/recent?path=${encodeURIComponent(path)}`, { method: "DELETE" });
+  }
+
   units(): Promise<Unit[]> {
     return this.request("/api/units");
   }
@@ -247,6 +283,10 @@ class ApiClient {
 
   summary(): Promise<ProjectSummary> {
     return this.request("/api/project/summary");
+  }
+
+  search(q: string): Promise<SearchResult> {
+    return this.request(`/api/search?q=${encodeURIComponent(q)}`);
   }
 
   logs(): Promise<AuditLog[]> {
@@ -368,6 +408,10 @@ class ApiClient {
     return this.request("/api/system/restart", { method: "POST" });
   }
 
+  quitProgram(): Promise<{ ok: boolean }> {
+    return this.request("/api/system/quit", { method: "POST" });
+  }
+
   issues(unitId: number): Promise<Issue[]> {
     return this.request(`/api/units/${unitId}/issues`);
   }
@@ -424,7 +468,7 @@ class ApiClient {
     return this.request(`/api/units/${unitId}/files`, { method: "POST", body: form });
   }
 
-  uploadFolder(unitId: number, folderName: string, files: Array<File | FolderUploadItem>): Promise<EvidenceFile> {
+  uploadFolder(unitId: number, folderName: string, files: Array<File | FolderUploadItem>): Promise<EvidenceFile | { duplicated: true; file: EvidenceFile; message: string }> {
     const form = new FormData();
     form.append("folder_name", folderName);
     for (const item of files) {
@@ -488,6 +532,10 @@ class ApiClient {
 
   openEvidenceFolder(fileId: number): Promise<{ ok: boolean }> {
     return this.request(`/api/files/${fileId}/directory/open`, { method: "POST" });
+  }
+
+  openFile(fileId: number): Promise<{ ok: boolean }> {
+    return this.request(`/api/files/${fileId}/open`, { method: "POST" });
   }
 
   async downloadFile(fileId: number, filename: string): Promise<void> {

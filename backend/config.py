@@ -17,14 +17,18 @@ class RuntimeSettings:
     """
 
     host: str = "127.0.0.1"
-    port: int = 0
+    # 固定默认端口：保证前端 localStorage（最近项目等按 origin 隔离）跨启动持久。
+    # 被占用时 main() 会回退动态端口，避免启动失败；测试/开发可用环境变量覆盖。
+    port: int = 8765
     debug: bool = False
     use_webview: bool = True
     frontend: str = "v3"
 
     @classmethod
     def from_environment(cls) -> "RuntimeSettings":
-        raw_port = os.environ.get("AUDIT_ASSISTANT_PORT", "0").strip()
+        # 默认固定端口 8765（与 dataclass 默认一致），保证前端 localStorage
+        # 按 origin 持久；测试/打包可用 AUDIT_ASSISTANT_PORT 覆盖。
+        raw_port = os.environ.get("AUDIT_ASSISTANT_PORT", "8765").strip()
         try:
             port = int(raw_port)
         except ValueError as exc:

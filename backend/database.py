@@ -774,9 +774,10 @@ class AuditProject:
         return grouped
 
     def summary(self) -> dict:
-        """三维汇总（T8）：按状态 / 按版块 / 按单位。
+        """三维汇总（T8）：按状态 / 按版块 / 按单位 + 问题明细列表。
 
-        返回 {by_status, by_dept, by_unit, total}，数量与明细一致（汇总数=明细数）。
+        返回 {by_status, by_dept, by_unit, total, issues}，数量与明细一致（汇总数=明细数）。
+        issues 供问题清单视图展示与跳转。
         """
         # 三组 SQL 聚合替代“每单位再查底稿/附件”的 2N+1 查询。
         with self._lock:
@@ -794,6 +795,13 @@ class AuditProject:
                 "FROM units u LEFT JOIN issues i ON i.unit_id=u.id LEFT JOIN files f ON f.unit_id=u.id "
                 "GROUP BY u.id, u.name ORDER BY u.sort_order, u.id"
             ).fetchall()
+            issue_rows = self._conn.execute(
+                "SELECT i.id, i.seq, i.unit_id, u.name unit_name, i.department, i.defect_type, "
+                "i.category, i.amount, i.status, i.author, i.reviewer, "
+                "(SELECT COUNT(*) FROM issue_files r WHERE r.issue_id=i.id) file_count "
+                "FROM issues i JOIN units u ON u.id=i.unit_id "
+                "ORDER BY u.sort_order, u.id, i.seq"
+            ).fetchall()
         by_status = {row["name"]: row["count"] for row in status_rows}
         by_dept = {row["name"]: row["count"] for row in dept_rows}
         by_unit = {row["name"]: {"issues": row["issues"], "files": row["files"]} for row in unit_rows}
@@ -803,6 +811,38 @@ class AuditProject:
             "by_dept": by_dept,
             "by_unit": by_unit,
             "total": total,
+            "issues": [dict(row) for row in issue_rows],
+        }
+
+    def search(self, q: str) -> dict:
+        """全局搜索：单位/底稿/附件按关键字模糊匹配，各类限 20 条。"""
+        q = (q or "").strip()
+        if not q:
+            return {"units": [], "issues": [], "files": []}
+        like = f"%{q}%"
+        with self._lock:
+            units = self._conn.execute(
+                "SELECT id, name FROM units WHERE name LIKE ? ORDER BY sort_order, id LIMIT 20",
+                (like,),
+            ).fetchall()
+            issues = self._conn.execute(
+                "SELECT i.id, i.seq, i.unit_id, u.name unit_name, i.department, i.defect_type, "
+                "i.category, i.amount, i.status FROM issues i JOIN units u ON u.id=i.unit_id "
+                "WHERE i.defect_type LIKE ? OR i.department LIKE ? OR i.defect_desc LIKE ? "
+                "OR i.regulation_basis LIKE ? OR i.suggestion LIKE ? "
+                "ORDER BY i.id DESC LIMIT 20",
+                (like, like, like, like, like),
+            ).fetchall()
+            files = self._conn.execute(
+                "SELECT f.id, f.unit_id, u.name unit_name, f.orig_name, f.mime, f.exclusive_to, f.rel_path "
+                "FROM files f JOIN units u ON u.id=f.unit_id "
+                "WHERE f.orig_name LIKE ? ORDER BY f.id DESC LIMIT 20",
+                (like,),
+            ).fetchall()
+        return {
+            "units": [dict(r) for r in units],
+            "issues": [dict(r) for r in issues],
+            "files": [dict(r) for r in files],
         }
 
     def get_issue(self, issue_id: int):
@@ -1069,11 +1109,13 @@ class AuditProject:
 
     # ───────────────────────── 附件 ─────────────────────────
 
-    def add_folder(self, unit_id: int, folder_files: list, folder_name: str, operator: str) -> dict:
+    def add_folder(self, unit_id: int, folder_files: list, folder_name: str, operator: str,
+                   sha256: str = "") -> dict:
         """文件夹上传：内容原样复制到 附件库/{单位}/{文件夹名}_{id}/，作为一个附件实体。
 
         folder_files: [(相对路径, 临时文件路径), ...]——目录内按相对路径还原结构。
         按单文件规则处理：列表一个条目、整体关联/删除/反查，不展开、不打包。
+        sha256: 文件夹内容指纹（相对路径+文件内容哈希的排序摘要），重复检测用。
         """
         unit = self.get_unit(unit_id)
         if not unit:
@@ -1101,7 +1143,7 @@ class AuditProject:
                 cur = self._conn.execute(
                     "INSERT INTO files(unit_id, stored_name, orig_name, rel_path, size, sha256, mime, created_at) "
                     "VALUES(?,?,?,?,?,?,?,?)",
-                    (unit_id, dirname, oname, rel, total, "", "folder", _now()),
+                    (unit_id, dirname, oname, rel, total, sha256, "folder", _now()),
                 )
                 fid = cur.lastrowid
         except Exception:
@@ -1110,6 +1152,18 @@ class AuditProject:
             raise
         self.log(operator, "导入文件夹", f"{unit['name']} · {oname}", f"{len(folder_files)} 个文件")
         return self.get_file(fid)
+
+    def find_folder_by_fingerprint(self, sha256: str) -> dict | None:
+        """文件夹查重：按内容指纹（相对路径+文件内容哈希）找已存在文件夹实体。"""
+        if not sha256:
+            return None
+        row = self._conn.execute(
+            "SELECT f.*, u.name AS unit_name FROM files f "
+            "JOIN units u ON u.id = f.unit_id WHERE f.mime='folder' AND f.sha256=? "
+            "ORDER BY f.id LIMIT 1",
+            (sha256,),
+        ).fetchone()
+        return dict(row) if row else None
 
     def get_file(self, file_id: int):
         r = self._conn.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()

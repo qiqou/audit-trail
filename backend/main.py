@@ -38,10 +38,13 @@ from platform_adapter import (
     PlatformError,
     acquire_single_instance,
     discover_instance_endpoint,
+    forget_recent,
     harden_project,
+    load_recent_all,
     open_browser,
     open_path,
     release_single_instance,
+    remember_recent,
     reserve_local_port,
     write_instance_endpoint,
 )
@@ -73,6 +76,19 @@ def _sha256_of(path) -> str:
         for chunk in iter(lambda: fh.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _folder_fingerprint(folder_files: list) -> str:
+    """文件夹内容指纹：每个成员「相对路径 + 文件内容哈希」排序后整体摘要。
+
+    目录结构或任一文件内容不同 → 指纹不同；目录结构相同且文件内容一致 → 判重。
+    """
+    import hashlib
+    parts = []
+    for rel, tmp in folder_files:
+        parts.append(f"{rel.replace(chr(92), '/')}\t{_sha256_of(tmp)}")
+    parts.sort()
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
 app = FastAPI(title="审迹", docs_url="/api/docs", openapi_url="/api/openapi.json")
 
@@ -259,6 +275,7 @@ def open_project(req: OpenReq, operator: str = Depends(get_operator)):
         # 版本兼容检查（T12）：更新版本创建的项目拒绝打开，给可执行提示
         raise HTTPException(status_code=400, detail=str(e))
     ctx.project.log(operator, "打开项目", str(p))
+    remember_recent(operator, str(p), ctx.project.project_name)
     return _project_info()
 
 
@@ -296,6 +313,7 @@ def create_project(req: CreateReq, operator: str = Depends(get_operator)):
         ctx.project.project_name = name
     harden_project(p)  # 隐藏目录：默认 Finder/资源管理器不可见，防人员误删改
     ctx.project.log(operator, "创建项目", name or p.name)
+    remember_recent(operator, str(p), ctx.project.project_name)
     return _project_info()
 
 
@@ -323,6 +341,7 @@ def delete_project(req: OpenReq, operator: str = Depends(get_operator)):
     except OSError as e:
         raise HTTPException(status_code=400,
                             detail=f"删除失败：{e}。请关闭占用该项目的程序后重试") from e
+    forget_recent(operator, str(p))
     return {"deleted": str(p)}
 
 
@@ -355,7 +374,21 @@ def rename_project(req: NameReq, operator: str = Depends(get_operator)):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     proj.log(operator, "重命名项目", f"{old} → {proj.project_name}")
+    remember_recent(operator, str(proj.root), proj.project_name)
     return _project_info()
+
+
+@app.get("/api/recent")
+def recent_projects(operator: str = Depends(get_operator)):
+    """最近项目列表（按使用人隔离，存本机 ~/.shenji，与端口/浏览器无关）。"""
+    return {"items": load_recent_all().get(operator, [])}
+
+
+@app.delete("/api/recent")
+def forget_recent_project(path: str, operator: str = Depends(get_operator)):
+    """从最近列表移除一条记录（不移除磁盘项目）。"""
+    forget_recent(operator, path)
+    return {"ok": True}
 
 
 @app.get("/api/project/health")
@@ -427,8 +460,14 @@ def project_manifest(_: str = Depends(get_operator)):
 
 @app.get("/api/project/summary")
 def project_summary(_: str = Depends(get_operator)):
-    """三维汇总（T8）：按状态/版块/单位，数量与明细一致。"""
+    """三维汇总（T8）：按状态/版块/单位 + 问题明细，数量与明细一致。"""
     return get_project().summary()
+
+
+@app.get("/api/search")
+def global_search(q: str = "", _: str = Depends(get_operator)):
+    """全局搜索：单位/底稿/附件按关键字模糊匹配（各类限 20 条）。"""
+    return get_project().search(q)
 
 
 def _close_current_project():
@@ -669,7 +708,17 @@ async def upload_folder(unit_id: int, folder_name: str = Form(...),
                 tmp_items.append((rel, tf.name))
         if not tmp_items:
             raise ValueError("文件夹为空")
-        rec = await run_in_threadpool(proj.add_folder, unit_id, tmp_items, folder_name, operator)
+        # 文件夹内容指纹：相对路径 + 文件内容哈希，排序后整体摘要（同目录同内容才判重）
+        fingerprint = await run_in_threadpool(_folder_fingerprint, tmp_items)
+        proj = get_project()
+        dup = await run_in_threadpool(proj.find_folder_by_fingerprint, fingerprint)
+        if dup:
+            return {
+                "duplicated": True,
+                "file": dup,
+                "message": f"工作区已存在相同文件夹「{dup['orig_name']}」（单位：{dup['unit_name']}），已复用，不重复存储",
+            }
+        rec = await run_in_threadpool(proj.add_folder, unit_id, tmp_items, folder_name, operator, fingerprint)
     except (KeyError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
@@ -740,6 +789,27 @@ def download_file(file_id: int, _: str = Depends(get_operator)):
     if not path.exists():
         raise HTTPException(status_code=404, detail="附件文件已丢失，请检查附件库目录")
     return FileResponse(path, filename=f["orig_name"])
+
+
+@app.post("/api/files/{file_id}/open")
+def open_file(file_id: int, operator: str = Depends(get_operator)):
+    """用系统默认程序打开附件文件（macOS open / Windows 默认关联程序）。"""
+    proj = get_project()
+    f = proj.get_file(file_id)
+    if not f:
+        raise HTTPException(status_code=404, detail="附件不存在")
+    try:
+        path = proj.attachment_path(f["rel_path"])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="附件文件已丢失，请检查附件库目录")
+    try:
+        open_path(path)
+    except PlatformError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    proj.log(operator, "打开附件", f["orig_name"])
+    return {"ok": True}
 
 
 @app.patch("/api/files/{file_id}")
@@ -1190,6 +1260,28 @@ def _do_restart():
         os._exit(0)
 
 
+@app.post("/api/system/quit")
+def quit_program(_: str = Depends(get_operator)):
+    """退出程序：关闭所有项目连接（SQLite 干净落盘）后退出进程。
+
+    打包版为 LSUIElement（无 Dock 图标），页面内退出是唯一优雅关闭入口。
+    """
+    threading.Timer(0.8, _do_quit).start()
+    return {"ok": True, "message": "程序正在退出…"}
+
+
+def _do_quit():
+    """实际退出动作（Timer 线程执行，测试可 monkeypatch _schedule_restart 拦下）。"""
+    for ctx in list(_sessions.values()):
+        if ctx.project is not None:
+            try:
+                ctx.project.close()
+            except Exception:
+                pass
+    # 立即退出当前进程（不跑 atexit/finally 清理；flock 随 fd 关闭自动释放）
+    os._exit(0)
+
+
 @app.post("/api/system/choose-folder")
 def choose_folder(_: str = Depends(get_operator)):
     """弹系统原生文件夹选择器（平台适配层 choose_folder）。
@@ -1256,10 +1348,13 @@ def _install_crash_hook() -> Path:
 
 
 def main():
-    """直接运行入口：单实例锁 → 预留动态端口 → 起服务 → 自动开浏览器。
+    """程序入口：--serve = 服务常驻（detached 子进程）；默认 = 启动器。
 
-    端口由操作系统分配（或由开发环境显式指定），并把已监听 socket 交给
-    Uvicorn，避免固定 8000 端口及“检查后被占用”的竞态。
+    启动器模式（每次双击执行的路径）：
+      服务已在跑 → 打开页面后立即退出；未在跑 → 拉起服务子进程（--serve），
+      等端口就绪后打开页面再退出。
+    这样 LaunchServices 始终认为应用“未在运行”——否则 macOS 会把第二次双击
+    当成“激活已有实例”，而 LSUIElement 应用没有可激活的 UI，报“没有响应”。
     """
     # Windows 打包版（console=False / windowed）没有控制台，sys.stdout/stderr 为 None，
     # uvicorn 的 ColourizedFormatter 初始化调 sys.stdout.isatty() → AttributeError 崩溃。
@@ -1269,18 +1364,72 @@ def main():
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115 替换全局流，句柄须存活到进程退出
     _install_crash_hook()
+    if "--serve" in sys.argv:
+        _serve()
+    else:
+        _launcher()
+
+
+def _launcher():
+    """启动器：探测已有实例 → 打开页面；否则拉起服务子进程并等就绪后打开页面。"""
+    import socket
+    import time as _time
+    from urllib.parse import urlparse
+
+    def _probe(url: str) -> bool:
+        try:
+            parsed = urlparse(url)
+            with socket.create_connection((parsed.hostname or "127.0.0.1", parsed.port or 80), timeout=0.5):
+                return True
+        except OSError:
+            return False
+
+    endpoint = discover_instance_endpoint()
+    if endpoint and _probe(endpoint):
+        print(f"审迹已在运行，正在打开页面：{endpoint}")
+        try:
+            open_browser(endpoint)
+        except PlatformError as e:
+            print(str(e))
+        return
+    # 未在运行：拉起服务子进程（detached，脱离本进程生命周期）
+    if getattr(sys, "frozen", False):
+        cmd = [sys.executable, "--serve"]
+    else:
+        script = Path(sys.argv[0]).resolve() if sys.argv else Path("main.py").resolve()
+        cmd = [sys.executable, str(script), "--serve"]
+    try:
+        subprocess.Popen(cmd, start_new_session=True)
+    except OSError as e:
+        print(f"无法启动服务：{e}")
+        return
+    url = None
+    for _ in range(40):
+        _time.sleep(0.25)
+        endpoint = discover_instance_endpoint()
+        if endpoint and _probe(endpoint):
+            url = endpoint
+            break
+    if url is None:
+        url = f"http://{HOST}:{SETTINGS.port}/"
+    print(f"审迹已启动：{url}")
+    try:
+        open_browser(url)
+    except PlatformError as e:
+        print(str(e))
+
+
+def _serve():
+    """服务常驻（--serve）：单实例锁 → 预留端口 → uvicorn 监听；浏览器由启动器负责打开。
+
+    端口由操作系统分配（或由开发环境显式指定），并把已监听 socket 交给
+    Uvicorn，避免固定 8000 端口及“检查后被占用”的竞态。
+    """
     lock_name = "shenji.lock"
     lock = acquire_single_instance(lock_name)
     if lock is None:
-        endpoint = discover_instance_endpoint(lock_name)
-        if endpoint:
-            print(f"审迹已在运行，正在打开页面：{endpoint}")
-            try:
-                open_browser(endpoint)
-            except PlatformError as e:
-                print(str(e))
-        else:
-            print("审迹已在运行，但未找到页面地址。请稍后重试，或手动访问启动日志中的本地地址。")
+        # 已有服务实例（多次双击的竞态），本进程直接退出
+        print("已有服务实例，退出")
         return
     listener = None
     try:
@@ -1291,7 +1440,6 @@ def main():
             return
         print(f"审迹正在启动：http://{HOST}:{port}")
         write_instance_endpoint(HOST, port, lock_name)
-        threading.Timer(1.0, _auto_open_browser, args=(port,)).start()
         import uvicorn
 
         if sys.platform == "win32":

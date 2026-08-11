@@ -7,6 +7,7 @@
 """
 
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -252,6 +253,177 @@ def test_attachment_directory_endpoints_accept_get_post_and_open_folder_entity(c
 
     assert opened[:2] == [project_root / "附件库" / f"unit_{unit_id}"] * 2
     assert opened[2] == project_root / folder["rel_path"]
+
+
+def test_open_file_endpoint_opens_attachment_with_default_program(client, tmp_path, monkeypatch):
+    """“打开”接口用系统默认程序打开附件真实路径，并写审计日志。"""
+    token = _login(client, "张三")
+    headers = _headers(token)
+    client.post("/api/project/create", json={"path": str(tmp_path / "项目A"), "name": "项目A"}, headers=headers)
+    unit_id = client.post("/api/units", json={"name": "单位A"}, headers=headers).json()["id"]
+    uploaded = client.post(
+        f"/api/units/{unit_id}/files",
+        files={"file": ("证据.pdf", b"%PDF shared", "application/pdf")},
+        headers=headers,
+    ).json()
+    file_id = uploaded["id"]
+
+    opened: list[Path] = []
+    monkeypatch.setattr(main, "open_path", lambda path: opened.append(Path(path)))
+    response = client.post(f"/api/files/{file_id}/open", headers=headers)
+
+    assert response.status_code == 200
+    proj = main._sessions[token].project
+    rec = proj.get_file(file_id)
+    assert opened == [proj.attachment_path(rec["rel_path"])]
+    logs = client.get("/api/logs", headers=headers).json()
+    assert logs[0]["action"] == "打开附件"
+
+    missing = client.post("/api/files/999999/open", headers=headers)
+    assert missing.status_code == 404
+
+
+def test_recent_projects_api(client, tmp_path):
+    """最近项目：打开/创建自动记录、重命名更新、按使用人隔离、可移除。"""
+    token = _login(client, "张三")
+    headers = _headers(token)
+
+    # 初始为空
+    assert client.get("/api/recent", headers=headers).json()["items"] == []
+
+    # 创建项目A → 记录 1 条
+    p1 = tmp_path / "项目A"
+    client.post("/api/project/create", json={"path": str(p1), "name": "项目A"}, headers=headers)
+    items = client.get("/api/recent", headers=headers).json()["items"]
+    assert len(items) == 1 and items[0]["name"] == "项目A"
+
+    # 打开项目B → 2 条，最新在前
+    p2 = tmp_path / "项目B"
+    client.post("/api/project/create", json={"path": str(p2), "name": "项目B"}, headers=headers)
+    items = client.get("/api/recent", headers=headers).json()["items"]
+    assert [it["name"] for it in items] == ["项目B", "项目A"]
+
+    # 重命名 → 最近记录名称同步更新
+    renamed = client.post("/api/project/rename", json={"name": "项目B改"}, headers=headers)
+    assert renamed.status_code == 200
+    items = client.get("/api/recent", headers=headers).json()["items"]
+    assert items[0]["name"] == "项目B改"
+
+    # 其他使用人看不到（按使用人隔离）
+    token2 = _login(client, "李四")
+    assert client.get("/api/recent", headers=_headers(token2)).json()["items"] == []
+
+    # 移除单条记录
+    removed = client.delete(f"/api/recent?path={quote(str(p2) + '.auditproj')}", headers=headers)
+    assert removed.status_code == 200
+    items = client.get("/api/recent", headers=headers).json()["items"]
+    assert [it["name"] for it in items] == ["项目A"]
+
+    # 删除项目 → 记录自动移除
+    deleted = client.post("/api/project/delete",
+                          json={"path": str(p1) + ".auditproj"}, headers=headers)
+    assert deleted.status_code == 200
+    assert client.get("/api/recent", headers=headers).json()["items"] == []
+
+
+def test_folder_upload_dedup_reuses_existing(client, tmp_path):
+    """文件夹上传：内容一致（目录结构+文件内容）时复用已有实体，不重复存储。"""
+    token = _login(client, "张三")
+    headers = _headers(token)
+    client.post("/api/project/create", json={"path": str(tmp_path / "项目A"), "name": "项目A"}, headers=headers)
+    unit_id = client.post("/api/units", json={"name": "单位A"}, headers=headers).json()["id"]
+
+    def upload_folder(payload: bytes):
+        return client.post(
+            f"/api/units/{unit_id}/folder-upload",
+            data={"folder_name": "合同资料"},
+            files=[("files", ("子目录/证据.txt", payload, "text/plain"))],
+            headers=headers,
+        )
+
+    r1 = upload_folder(b"same content")
+    assert r1.status_code == 200
+    first = r1.json()
+    assert first["mime"] == "folder" and first["sha256"] != ""
+
+    # 相同内容 → duplicated 复用
+    r2 = upload_folder(b"same content")
+    assert r2.status_code == 200
+    body2 = r2.json()
+    assert body2["duplicated"] is True and body2["file"]["id"] == first["id"]
+
+    # 内容不同 → 新建实体
+    r3 = upload_folder(b"different content")
+    assert r3.status_code == 200
+    assert "duplicated" not in r3.json()
+    assert r3.json()["id"] != first["id"]
+
+    # 目录结构不同（同内容不同路径）→ 不判重
+    r4 = client.post(
+        f"/api/units/{unit_id}/folder-upload",
+        data={"folder_name": "合同资料"},
+        files=[("files", ("其他目录/证据.txt", b"same content", "text/plain"))],
+        headers=headers,
+    )
+    assert "duplicated" not in r4.json()
+
+
+def test_global_search_finds_units_issues_files(client, tmp_path):
+    """全局搜索：单位/底稿/附件按关键字模糊匹配。"""
+    token = _login(client, "张三")
+    headers = _headers(token)
+    client.post("/api/project/create", json={"path": str(tmp_path / "项目A"), "name": "项目A"}, headers=headers)
+    unit_id = client.post("/api/units", json={"name": "华电集团XX电厂"}, headers=headers).json()["id"]
+    client.post(f"/api/units/{unit_id}/issues", json={"department": "营销管理", "defect_type": "合同签订不规范", "amount": "12345"}, headers=headers)
+    client.post(
+        f"/api/units/{unit_id}/files",
+        headers=headers,
+        files={"file": ("付款凭证.pdf", b"%PDF-fake-content", "application/pdf")},
+    )
+
+    r = client.get("/api/search", params={"q": "电厂"}, headers=headers).json()
+    assert [u["name"] for u in r["units"]] == ["华电集团XX电厂"]
+
+    r = client.get("/api/search", params={"q": "合同"}, headers=headers).json()
+    assert any(i["defect_type"] == "合同签订不规范" for i in r["issues"])
+
+    r = client.get("/api/search", params={"q": "付款凭证"}, headers=headers).json()
+    assert [f["orig_name"] for f in r["files"]] == ["付款凭证.pdf"]
+
+    # 空关键字 → 三空
+    r = client.get("/api/search", params={"q": "  "}, headers=headers).json()
+    assert r == {"units": [], "issues": [], "files": []}
+
+
+def test_summary_includes_issue_list(client, tmp_path):
+    """项目汇总：返回问题明细列表（含单位名、金额、状态、附件数）。"""
+    token = _login(client, "张三")
+    headers = _headers(token)
+    client.post("/api/project/create", json={"path": str(tmp_path / "项目A"), "name": "项目A"}, headers=headers)
+    unit_id = client.post("/api/units", json={"name": "单位A"}, headers=headers).json()["id"]
+    client.post(f"/api/units/{unit_id}/issues", json={"department": "营销管理", "defect_type": "问题A", "amount": "100"}, headers=headers)
+    client.post(f"/api/units/{unit_id}/issues", json={"department": "财务管理", "defect_type": "问题B"}, headers=headers)
+
+    data = client.get("/api/project/summary", headers=headers).json()
+    assert data["total"] == 2
+    assert len(data["issues"]) == 2
+    first = data["issues"][0]
+    assert first["unit_name"] == "单位A" and first["defect_type"] == "问题A"
+    assert first["amount"] == "100" and first["status"] == "草稿" and "file_count" in first
+
+
+def test_system_quit_returns_ok(client, tmp_path, monkeypatch):
+    """退出端点：返回 ok 且不抛错（_do_quit 由 Timer 延迟执行，测试拦下）。"""
+    # 注意：测试用 from main import app（backend/main.py 以顶层名导入的副本），
+    # monkeypatch 必须打 main 模块而非 backend.main（两者是两个实例，打错会触发真 os._exit）
+    import main as main_module
+    token = _login(client, "张三")
+    headers = _headers(token)
+    monkeypatch.setattr(main_module, "_do_quit", lambda: None)
+    r = client.post("/api/system/quit", headers=headers)
+    assert r.status_code == 200 and r.json()["ok"] is True
+    import time
+    time.sleep(1.2)  # 等 Timer 触发（_do_quit 已被替换为空操作）
 
 
 def test_backup_download_url_works(client, tmp_path):

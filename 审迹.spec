@@ -122,7 +122,7 @@ if IS_MAC:
             'CFBundleShortVersionString': APP_VERSION,
             'CFBundleVersion': APP_VERSION,
             'NSHighResolutionCapable': True,
-            'LSUIElement': False,
+            'LSUIElement': True,   # 无 Dock 图标：web 服务型应用，避免无窗口弹跳
         },
     )
 else:

@@ -2,7 +2,8 @@
 import { computed, onBeforeUnmount, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import { api, type AuditLog, type ImportResult, type MergeResult, type ProjectInfo, type ProjectSummary, type ScanStatus, type Unit } from "../api/client";
+import { api, type AuditLog, type ImportResult, type MergeResult, type ProjectInfo, type ProjectSummary, type ScanStatus, type SearchResult, type SummaryIssue, type Unit } from "../api/client";
+import { formatIssueNo } from "../format";
 
 type AutoSaveMode = "realtime" | "5m" | "20m";
 
@@ -23,9 +24,11 @@ const emit = defineEmits<{
   autoSaveModeChanged: [mode: AutoSaveMode];
   projectRenamed: [project: ProjectInfo];
   issueNumberChanged: [rule: { prefix: string; suffix: string }];
+  openIssue: [issueId: number];
+  selectUnit: [unitId: number];
 }>();
 
-type Panel = "" | "import" | "export" | "package" | "backup" | "merge" | "restore" | "settings" | "summary" | "logs" | "scan" | "rename";
+type Panel = "" | "import" | "export" | "package" | "backup" | "merge" | "restore" | "settings" | "summary" | "logs" | "scan" | "rename" | "search";
 
 const activePanel = ref<Panel>("");
 const working = ref(false);
@@ -55,6 +58,96 @@ const scan = ref<ScanStatus | null>(null);
 const projectNameDraft = ref("");
 let scanTimer: ReturnType<typeof window.setTimeout> | undefined;
 
+// ── 全局搜索状态 ──
+const searchQuery = ref("");
+const searchResult = ref<SearchResult | null>(null);
+const searchLoading = ref(false);
+let searchTimer: ReturnType<typeof window.setTimeout> | undefined;
+
+// ── 问题清单筛选状态（summary 面板）──
+const summaryUnitFilter = ref<number | null>(null);
+const summaryStatusFilter = ref("");
+const summaryDepartmentFilter = ref("");
+
+function openSearch(): void {
+  show("search");
+  if (searchQuery.value.trim()) void runSearch();
+}
+
+async function runSearch(): Promise<void> {
+  const q = searchQuery.value.trim();
+  if (!q) {
+    searchResult.value = null;
+    return;
+  }
+  searchLoading.value = true;
+  try {
+    searchResult.value = await api.search(q);
+  } catch (error) {
+    report(error);
+  } finally {
+    searchLoading.value = false;
+  }
+}
+
+function onSearchInput(): void {
+  window.clearTimeout(searchTimer);
+  searchTimer = window.setTimeout(() => { void runSearch(); }, 300);
+}
+
+function formatAmount(value: string | number | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toLocaleString("zh-CN") : String(value);
+}
+
+function issueLabel(issue: SummaryIssue): string {
+  return `${formatIssueNo(issue.seq, props.issueNumberRule)} ${issue.defect_type || "未命名底稿"}`;
+}
+
+function goIssue(issueId: number): void {
+  activePanel.value = "";
+  emit("openIssue", issueId);
+}
+
+function goUnit(unitId: number): void {
+  activePanel.value = "";
+  emit("selectUnit", unitId);
+}
+
+const summaryIssues = computed(() => {
+  if (!summary.value) return [];
+  return summary.value.issues.filter((issue) => {
+    if (summaryUnitFilter.value !== null && issue.unit_id !== summaryUnitFilter.value) return false;
+    if (summaryStatusFilter.value && issue.status !== summaryStatusFilter.value) return false;
+    if (summaryDepartmentFilter.value !== "" && (issue.department || "") !== summaryDepartmentFilter.value) return false;
+    return true;
+  });
+});
+
+const summaryAmountTotal = computed(() => {
+  let total = 0;
+  for (const issue of summaryIssues.value) {
+    const amount = parseFloat(issue.amount);
+    if (!Number.isNaN(amount)) total += amount;
+  }
+  return total;
+});
+
+const summaryUnitsCount = computed(() => {
+  return new Set(summaryIssues.value.map((issue) => issue.unit_id)).size;
+});
+
+const summaryStatuses = computed(() => {
+  if (!summary.value) return [];
+  return Array.from(new Set(summary.value.issues.map((issue) => issue.status || "草稿")));
+});
+
+const summaryDepartments = computed(() => {
+  if (!summary.value) return [];
+  return Array.from(new Set(summary.value.issues.map((issue) => issue.department || "")));
+});
+
 const selectedPackageCount = computed(() => packageScope.value === "all" ? props.units.length : packageUnitIds.value.length);
 const dialogTitles: Partial<Record<Panel, string>> = {
   import: "导入问题汇总（Excel）",
@@ -64,17 +157,22 @@ const dialogTitles: Partial<Record<Panel, string>> = {
   merge: "合并导入（.auditbak）",
   restore: "导入备份（恢复项目）",
   settings: "编制与预设设置",
-  summary: "项目汇总视图",
+  summary: "问题清单视图",
   logs: "操作日志（随项目保存）",
   scan: "附件完整性扫描",
   rename: "重命名项目",
+  search: "全局搜索",
 };
 const dialogVisible = computed({
   get: () => Boolean(activePanel.value),
   set: (visible: boolean) => { if (!visible) activePanel.value = ""; },
 });
-const dialogTitle = computed(() => dialogTitles[activePanel.value] ?? "项目操作");
-
+const dialogTitle = computed(() => activePanel.value ? dialogTitles[activePanel.value] ?? "操作" : "");
+const dialogWidth = computed(() => activePanel.value === "summary"
+  ? "min(980px, calc(100vw - 32px))"
+  : activePanel.value === "search"
+    ? "min(720px, calc(100vw - 32px))"
+    : "min(560px, calc(100vw - 32px))");
 function report(error: unknown): void {
   ElMessage.error(error instanceof Error ? error.message : "项目操作失败，请重试");
 }
@@ -99,6 +197,7 @@ function command(value: string): void {
   if (value === "scan") { void startScan(); return; }
   if (value === "rename") { openRename(); return; }
   if (value === "restart") { void restartProgram(); return; }
+  if (value === "quit") { void quitProgram(); return; }
   if (value === "reset") { void resetProject(); return; }
   show(value);
 }
@@ -526,6 +625,28 @@ async function restartProgram(): Promise<void> {
   }
 }
 
+async function quitProgram(): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      "程序将退出，浏览器页面将无法访问。底稿内容已自动保存，退出前会安全关闭数据库。是否退出？",
+      "退出程序",
+      { type: "warning", confirmButtonText: "退出程序", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  working.value = true;
+  try {
+    await api.quitProgram();
+    activePanel.value = "";
+    ElMessage.success("程序正在退出…");
+  } catch (error) {
+    report(error);
+  } finally {
+    working.value = false;
+  }
+}
+
 async function resetProject(): Promise<void> {
   try {
     const { value } = await ElMessageBox.prompt(
@@ -556,6 +677,7 @@ async function resetProject(): Promise<void> {
 <template>
   <div class="project-operations">
     <el-button size="small" @click="openSummary">📊 项目汇总</el-button>
+    <el-button size="small" @click="openSearch">🔍 搜索</el-button>
     <el-dropdown trigger="click" @command="command">
       <el-button size="small">项目菜单 ▾</el-button>
       <template #dropdown>
@@ -572,12 +694,13 @@ async function resetProject(): Promise<void> {
           <el-dropdown-item command="merge">🔄 合并导入多个备份</el-dropdown-item>
           <el-dropdown-item command="restore">♻️ 导入备份（恢复项目）</el-dropdown-item>
           <el-dropdown-item command="restart" divided>🔄 重启程序</el-dropdown-item>
+          <el-dropdown-item command="quit">⏻ 退出程序</el-dropdown-item>
           <el-dropdown-item command="reset" class="danger-item">🗑 重置项目（清空全部数据）</el-dropdown-item>
         </el-dropdown-menu>
       </template>
     </el-dropdown>
 
-    <el-dialog v-model="dialogVisible" :title="dialogTitle" width="min(560px, calc(100vw - 32px))" append-to-body>
+    <el-dialog v-model="dialogVisible" :title="dialogTitle" :width="dialogWidth" append-to-body>
       <div v-if="activePanel === 'settings'" class="operation-panel">
         <section class="preset-section"><h3>版本历史与自动保存</h3><p>仅当底稿内容发生变化时才保存新版本；没有变化不会重复留版。</p><div class="tool-options"><label><input type="radio" name="auto-save-mode" :checked="autoSaveMode === 'realtime'" @change="changeAutoSaveMode('realtime')" /> 输入停止后实时保存</label><label><input type="radio" name="auto-save-mode" :checked="autoSaveMode === '5m'" @change="changeAutoSaveMode('5m')" /> 每 5 分钟保存（默认）</label><label><input type="radio" name="auto-save-mode" :checked="autoSaveMode === '20m'" @change="changeAutoSaveMode('20m')" /> 每 20 分钟保存</label></div></section>
         <section class="preset-section"><h3>底稿编号规则</h3><p>界面、台账与归档目录中的底稿编号 = 前缀 + 数字序号 + 后缀，作为唯一识别码全程一致；默认仅数字序号。</p><div class="tool-actions"><el-input v-model="issuePrefix" placeholder="前缀（可空，如 A-）" style="width: 150px" /><el-input v-model="issueSuffix" placeholder="后缀（可空，如 号）" style="width: 150px" /><el-button type="primary" :loading="working" @click="saveIssueNumber">保存</el-button></div><p class="version-hint">预览：{{ issuePrefix || "（空）" }}123{{ issueSuffix || "（空）" }}</p></section>
@@ -587,9 +710,34 @@ async function resetProject(): Promise<void> {
       </div>
 
       <div v-else-if="activePanel === 'summary'" class="operation-panel">
-        <div class="panel-head"><p>汇总数与问题列表一致；单位列显示“底稿数 / 附件数”。</p><el-button size="small" @click="openSummary">刷新</el-button></div>
-        <el-empty v-if="!summary" description="正在读取项目汇总…" :image-size="58" />
-        <template v-else><div class="summary-total">共 {{ summary.total }} 条底稿</div><div class="summary-grid"><section><h3>按状态</h3><div v-if="Object.keys(summary.by_status).length" class="summary-items"><div v-for="(count, name) in summary.by_status" :key="name"><span>{{ name }}</span><strong>{{ count }}</strong></div></div><p v-else class="summary-empty">暂无数据</p></section><section><h3>按版块</h3><div v-if="Object.keys(summary.by_dept).length" class="summary-items"><div v-for="(count, name) in summary.by_dept" :key="name"><span>{{ name }}</span><strong>{{ count }}</strong></div></div><p v-else class="summary-empty">暂无数据</p></section><section><h3>按单位（底稿 / 附件）</h3><div v-if="Object.keys(summary.by_unit).length" class="summary-items"><div v-for="(value, name) in summary.by_unit" :key="name"><span>{{ name }}</span><strong>{{ value.issues }} / {{ value.files }}</strong></div></div><p v-else class="summary-empty">暂无数据</p></section></div></template>
+        <div class="panel-head"><p>点击问题行可跳转到对应底稿；金额合计随筛选变化。</p><el-button size="small" @click="openSummary">刷新</el-button></div>
+        <el-empty v-if="!summary" description="正在读取问题清单…" :image-size="58" />
+        <template v-else>
+          <div class="summary-total">共 {{ summary.total }} 个底稿 · 当前筛选 {{ summaryIssues.length }} 项 · 涉及 {{ summaryUnitsCount }} 个单位 · 金额合计 ¥{{ formatAmount(summaryAmountTotal) }}</div>
+          <div class="summary-filters"><select v-model="summaryUnitFilter"><option :value="null">全部单位</option><option v-for="unit in units" :key="unit.id" :value="unit.id">{{ unit.name }}</option></select><select v-model="summaryDepartmentFilter"><option value="">全部版块</option><option v-for="department in summaryDepartments" :key="department" :value="department">{{ department || '未分版块' }}</option></select><select v-model="summaryStatusFilter"><option value="">全部状态</option><option v-for="status in summaryStatuses" :key="status" :value="status">{{ status }}</option></select></div>
+          <div class="issue-table-head"><span>底稿</span><span>单位</span><span>版块</span><span>定性</span><span class="num">金额</span><span>状态</span></div>
+          <div class="issue-table">
+            <div v-for="issue in summaryIssues" :key="issue.id" class="issue-table-row" @click="goIssue(issue.id)">
+              <span>{{ formatIssueNo(issue.seq, issueNumberRule) }}</span><span>{{ issue.unit_name }}</span><span>{{ issue.department || '—' }}</span><span class="defect">{{ issue.defect_type }}</span><span class="num">{{ formatAmount(issue.amount) }}</span><span>{{ issue.status }}</span>
+            </div>
+            <el-empty v-if="!summaryIssues.length" description="无符合筛选条件的问题" :image-size="50" />
+          </div>
+          <div class="summary-grid"><section><h3>按状态</h3><div v-if="Object.keys(summary.by_status).length" class="summary-items"><div v-for="(count, name) in summary.by_status" :key="name"><span>{{ name }}</span><strong>{{ count }}</strong></div></div><p v-else class="summary-empty">暂无数据</p></section><section><h3>按版块</h3><div v-if="Object.keys(summary.by_dept).length" class="summary-items"><div v-for="(count, name) in summary.by_dept" :key="name"><span>{{ name }}</span><strong>{{ count }}</strong></div></div><p v-else class="summary-empty">暂无数据</p></section><section><h3>按单位（底稿 / 附件）</h3><div v-if="Object.keys(summary.by_unit).length" class="summary-items"><div v-for="(value, name) in summary.by_unit" :key="name"><span>{{ name }}</span><strong>{{ value.issues }} / {{ value.files }}</strong></div></div><p v-else class="summary-empty">暂无数据</p></section></div>
+        </template>
+      </div>
+
+      <div v-else-if="activePanel === 'search'" class="operation-panel">
+        <el-input v-model="searchQuery" placeholder="搜索单位、底稿（定性/版块/描述/依据/建议）、附件文件名…" clearable @input="onSearchInput" @keyup.enter="runSearch" />
+        <div class="search-results">
+          <p v-if="searchLoading" class="summary-empty">搜索中…</p>
+          <template v-else-if="searchResult">
+            <section v-if="searchResult.units.length"><h3>单位（{{ searchResult.units.length }}）</h3><div v-for="unit in searchResult.units" :key="unit.id" class="search-row" @click="goUnit(unit.id)"><span>🏢 {{ unit.name }}</span><small>跳转到该单位</small></div></section>
+            <section v-if="searchResult.issues.length"><h3>底稿（{{ searchResult.issues.length }}）</h3><div v-for="issue in searchResult.issues" :key="issue.id" class="search-row" @click="goIssue(issue.id)"><span>📄 {{ issueLabel(issue) }}</span><small>{{ issue.unit_name }} · {{ issue.department || '未分版块' }} · 金额 {{ formatAmount(issue.amount) }}</small></div></section>
+            <section v-if="searchResult.files.length"><h3>附件（{{ searchResult.files.length }}）</h3><div v-for="file in searchResult.files" :key="file.id" class="search-row" @click="goUnit(file.unit_id)"><span>{{ file.mime === 'folder' ? '📁' : '📎' }} {{ file.orig_name }}</span><small>{{ file.unit_name }} · {{ file.mime === 'folder' ? '文件夹' : '文件' }}</small></div></section>
+            <el-empty v-if="!searchResult.units.length && !searchResult.issues.length && !searchResult.files.length" description="未找到匹配内容" :image-size="50" />
+          </template>
+          <p v-else class="summary-empty">输入关键字开始搜索；支持单位名、底稿定性/描述/制度依据/审计建议、附件文件名。</p>
+        </div>
       </div>
 
       <div v-else-if="activePanel === 'logs'" class="operation-panel">

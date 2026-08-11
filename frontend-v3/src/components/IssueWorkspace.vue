@@ -398,7 +398,25 @@ async function confirmCurrentLeave(): Promise<boolean> {
   return editor.value.confirmLeave();
 }
 
-defineExpose({ confirmCurrentLeave });
+async function selectIssueById(issueId: number): Promise<void> {
+  try {
+    const issue = await api.issue(issueId);
+    if (current.value?.id === issue.id) return;
+    if (current.value && editor.value && !(await editor.value.confirmLeave())) return;
+    selectedUnitId.value = issue.unit_id;
+    current.value = issue;
+  } catch (error) {
+    report(error);
+  }
+}
+
+function selectUnit(unitId: number): void {
+  treeView.value = "unit";
+  selectedUnitId.value = unitId;
+  current.value = null;
+}
+
+defineExpose({ confirmCurrentLeave, selectIssueById, selectUnit });
 </script>
 
 <template>
