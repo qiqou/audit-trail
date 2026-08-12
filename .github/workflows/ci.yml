@@ -80,48 +80,46 @@ jobs:
           Write-Host "冒烟测试: $($exe.FullName)"
           $p = Start-Process -FilePath $exe.FullName -PassThru
           $ok = $false
+          $endpointFile = "$env:USERPROFILE\.shenji\shenji.endpoint.json"
           for ($i = 0; $i -lt 150; $i++) {
             Start-Sleep -Seconds 1
-            if ($p.HasExited) { break }
-            $ports = @(Get-NetTCPConnection -OwningProcess $p.Id -State Listen -ErrorAction SilentlyContinue |
-              Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1') } |
-              Select-Object -ExpandProperty LocalPort -Unique)
-            foreach ($port in $ports) {
+            # 新架构（启动器/服务分离）：启动器拉起服务子进程后即正常退出（exit 0），
+            # 不能再以 $p.HasExited 判失败；服务地址从 endpoint 文件读取。
+            $url = $null
+            if (Test-Path $endpointFile) {
               try {
-                $r = Invoke-WebRequest -Uri "http://127.0.0.1:$port/" -UseBasicParsing -TimeoutSec 2
+                $ep = Get-Content $endpointFile -Raw | ConvertFrom-Json
+                if ($ep.host -and $ep.port) { $url = "http://$($ep.host):$($ep.port)/" }
+              } catch {}
+            }
+            if ($url) {
+              try {
+                $r = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2
                 if ($r.StatusCode -eq 200) { $ok = $true; break }
               } catch {}
             }
-            if ($ok) { break }
-            if ($i -eq 30) {
+            if ($i -eq 30 -and -not $ok) {
               Write-Host "--- 30s 诊断 ---"
               $p.Refresh()
-              Write-Host "进程存活: $(-not $p.HasExited)  主窗口标题: '$($p.MainWindowTitle)'"
-              Get-NetTCPConnection -OwningProcess $p.Id -State Listen -ErrorAction SilentlyContinue
+              Write-Host "启动器进程存活: $(-not $p.HasExited)"
+              Get-Content $endpointFile -ErrorAction SilentlyContinue
               $logDir = "$env:USERPROFILE\.shenji\logs"
-              if (Test-Path $logDir) {
-                Get-ChildItem $logDir | ForEach-Object { Write-Host "=== 崩溃日志 $($_.Name) ==="; Get-Content $_.FullName }
-              } else {
-                Write-Host "(无崩溃日志目录: $logDir)"
-              }
+              if (Test-Path $logDir) { Get-ChildItem $logDir | ForEach-Object { Write-Host "=== 崩溃日志 $($_.Name) ==="; Get-Content $_.FullName } } else { Write-Host "(无崩溃日志目录: $logDir)" }
             }
           }
           if (-not $ok) {
             Write-Host "--- 最终取证 ---"
             $p.Refresh()
-            Write-Host "进程已退出: $($p.HasExited)"
-            if ($p.HasExited) { Write-Host "exit code=$($p.ExitCode)" } else { Write-Host "主窗口标题: '$($p.MainWindowTitle)'" }
+            Write-Host "启动器进程已退出: $($p.HasExited)  exit code=$($p.ExitCode)"
+            Get-Content $endpointFile -ErrorAction SilentlyContinue
             $logDir = "$env:USERPROFILE\.shenji\logs"
-            if (Test-Path $logDir) {
-              Get-ChildItem $logDir | ForEach-Object { Write-Host "=== 崩溃日志 $($_.Name) ==="; Get-Content $_.FullName }
-            } else {
-              Write-Host "(无崩溃日志目录: $logDir)"
-            }
-            Get-NetTCPConnection -OwningProcess $p.Id -State Listen -ErrorAction SilentlyContinue
+            if (Test-Path $logDir) { Get-ChildItem $logDir | ForEach-Object { Write-Host "=== 崩溃日志 $($_.Name) ==="; Get-Content $_.FullName } } else { Write-Host "(无崩溃日志目录: $logDir)" }
+            Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalAddress -in @('127.0.0.1','::1') }
           }
-          if ($p.HasExited) {
-            Write-Host "exe 启动即退出, exit code=$($p.ExitCode)"
-            throw "exe 启动失败"
+          # 清理：杀掉监听 127.0.0.1 的审迹服务进程（启动器已退出，$p.Id 无效）
+          Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalAddress -in @('127.0.0.1','::1') } | ForEach-Object {
+            $proc = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
+            if ($proc -and $proc.ProcessName -like "*审迹*") { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
           }
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
           if (-not $ok) { throw "服务未在 150 秒内就绪" }
@@ -176,15 +174,15 @@ jobs:
           APP_BIN="dist/审迹.app/Contents/MacOS/审迹"
           "$APP_BIN" > /tmp/audit-assistant-smoke.log 2>&1 &
           APP_PID=$!
-          trap 'kill "$APP_PID" 2>/dev/null || true' EXIT
+          # 新架构（启动器/服务分离）：启动器拉起服务子进程后即正常退出，不能 kill -0 判失败；
+          # 退出时清掉服务子进程（--serve）
+          trap 'pkill -f "审迹.*--serve" 2>/dev/null || true' EXIT
           OK=0
           for i in $(seq 1 150); do
-            if ! kill -0 "$APP_PID" 2>/dev/null; then
-              cat /tmp/audit-assistant-smoke.log
-              echo "应用启动即退出"
-              exit 1
+            PORT=""
+            if [ -f "$HOME/.shenji/shenji.endpoint.json" ]; then
+              PORT=$(python3 -c "import json;d=json.load(open('$HOME/.shenji/shenji.endpoint.json'));print(d.get('port') or '')" 2>/dev/null)
             fi
-            PORT=$(lsof -Pan -p "$APP_PID" -iTCP -sTCP:LISTEN 2>/dev/null | grep "127.0.0.1" | head -1 | sed -E 's/.*TCP 127\.0\.0\.1:([0-9]+).*/\1/')
             if [ -n "$PORT" ] && curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/" >/dev/null; then
               OK=1
               break
