@@ -17,8 +17,8 @@ step() { printf '\n==> %s\n' "$1"; }
 
 command -v python3.11 >/dev/null || fail "未找到 Python 3.11.11"
 [[ "$(python3.11 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')" == "3.11.11" ]] || fail "需要 Python 3.11.11"
-command -v node >/dev/null || fail "未找到 Node.js 22.12.0"
-[[ "$(node --version | sed 's/^v//')" == "22.12.0" ]] || fail "需要 Node.js 22.12.0"
+command -v node >/dev/null || fail "未找到 Node.js 22.13+"
+[[ "$(node --version | sed 's/^v//')" > "22.13" ]] || fail "需要 Node.js 22.13+（pnpm 11 引擎要求）"
 command -v pnpm >/dev/null || fail "未找到 pnpm 11.5.0"
 [[ "$(pnpm --version)" == "11.5.0" ]] || fail "需要 pnpm 11.5.0"
 
