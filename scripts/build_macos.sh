@@ -15,8 +15,9 @@ step() { printf '\n==> %s\n' "$1"; }
 [[ "$(sw_vers -productVersion | cut -d. -f1)" == "14" ]] || fail "发布构建机必须为 macOS 14"
 [[ "$(uname -m)" == "arm64" ]] || fail "发布包仅支持 Apple Silicon（arm64）"
 
-command -v python3.11 >/dev/null || fail "未找到 Python 3.11.11"
-[[ "$(python3.11 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')" == "3.11.11" ]] || fail "需要 Python 3.11.11"
+command -v python3.11 >/dev/null || fail "未找到 Python 3.11.x"
+PYVER=$(python3.11 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
+[[ "$PYVER" == "3.11" ]] || fail "需要 Python 3.11.x（当前 $PYVER）"
 command -v node >/dev/null || fail "未找到 Node.js 22.13+"
 [[ "$(node --version | sed 's/^v//')" > "22.13" ]] || fail "需要 Node.js 22.13+（pnpm 11 引擎要求）"
 command -v pnpm >/dev/null || fail "未找到 pnpm 11.5.0"
