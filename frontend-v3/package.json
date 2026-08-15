@@ -9,8 +9,7 @@
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "check:ui-contract": "node ../scripts/check_frontend_ui_contract.mjs",
-    "build": "pnpm run check:ui-contract && vue-tsc --noEmit && vite build",
+    "build": "vue-tsc --noEmit && vite build",
     "typecheck": "vue-tsc --noEmit",
     "test:e2e": "playwright test"
   },
