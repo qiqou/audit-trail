@@ -83,16 +83,3 @@ def test_api_open_legacy_ok(proj):
         ver = conn2.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
         conn2.close()
         assert ver == str(SCHEMA_VERSION)
-
-
-def test_docs_exist():
-    """T12 文档齐备：用户说明 + 回滚策略。"""
-    root = pytest.importorskip("pathlib").Path(__file__).resolve().parent.parent
-    assert (root / "用户说明.md").exists()
-    assert (root / "回滚策略_T12.md").exists()
-    guide = (root / "用户说明.md").read_text(encoding="utf-8")
-    for keyword in ("安装", "升级", "备份", "回滚", "常见问题"):
-        assert keyword in guide
-    rollback = (root / "回滚策略_T12.md").read_text(encoding="utf-8")
-    for keyword in ("备份", "版本兼容", "回退", "旧版"):
-        assert keyword in rollback

@@ -27,3 +27,7 @@ scripts/__pycache__/
 frontend-v3/dist/
 frontend-v3/node_modules/
 .pnpm-store/
+
+# 内部过程文档（不进仓库）
+P0_验收清单_04_11除外.md
+审迹v1.1_项目代码审查报告.md
