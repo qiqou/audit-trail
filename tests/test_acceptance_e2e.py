@@ -119,7 +119,15 @@ def test_acceptance_full_loop(client, tmp_path):
     assert xlsx_out.exists()
 
     # 7) 打包 ZIP（按版块分类）
-    r = client.post("/api/export/package", json={"scope": "all", "group_by_dept": True}, headers=_h(t))
+    checked = client.post(
+        "/api/export/package/preflight", json={"scope": "all", "group_by_dept": True}, headers=_h(t)
+    )
+    assert checked.status_code == 200
+    r = client.post(
+        "/api/export/package",
+        json={"scope": "all", "group_by_dept": True, "confirmation_token": checked.json()["confirmation_token"]},
+        headers=_h(t),
+    )
     assert r.status_code == 200
     zip_out = project_path / "输出" / r.json()["filename"]
     with zipfile.ZipFile(zip_out) as zf:

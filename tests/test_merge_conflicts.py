@@ -10,6 +10,8 @@ import sqlite3
 import zipfile
 from pathlib import Path
 
+import export
+import pytest
 from database import AuditProject
 from export import merge_backups
 
@@ -197,3 +199,24 @@ def test_merge_preserves_status_versions_and_exclusive_evidence(proj, tmp_path):
     ]
     assert imported_file["exclusive_to"] == imported_issue["id"]
     assert proj.linked_issue_ids_for_file(imported_file["id"]) == [imported_issue["id"]]
+    assert result["source_logs"] > 0
+    assert any(log["action"] == "保留来源操作日志" for log in proj.list_logs())
+
+
+def test_merge_failure_never_commits_partial_stage(proj, tmp_path, monkeypatch):
+    """P0：任一来源处理失败时，单位、附件和数据库都不能留下半批次结果。"""
+    original_unit = proj.add_unit("正式项目原单位", "张三")
+    source = AuditProject(tmp_path / "source_for_atomic")
+    source.add_unit("不应写入的来源单位", "李四")
+    backup = _make_backup(source, "原子失败")
+
+    def fail_after_stage_write(stage, _paths, operator):
+        stage.add_unit("暂存写入", operator)
+        raise OSError("模拟合并中断")
+
+    monkeypatch.setattr(export, "_merge_backups_in_place", fail_after_stage_write)
+    with pytest.raises(OSError, match="模拟合并中断"):
+        merge_backups(proj, [backup], "张三")
+
+    assert [unit["name"] for unit in proj.list_units()] == ["正式项目原单位"]
+    assert proj.get_unit(original_unit)["name"] == "正式项目原单位"

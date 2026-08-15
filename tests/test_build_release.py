@@ -7,6 +7,8 @@
 """
 
 import hashlib
+import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -19,8 +21,13 @@ def test_version_single_source():
     from version import APP_NAME, APP_VERSION, BUNDLE_ID
 
     assert APP_NAME == "审迹"
-    assert APP_VERSION
+    assert APP_VERSION == "1.2.0"
     assert BUNDLE_ID.startswith("com.")
+    root = Path(__file__).resolve().parent.parent
+    package = json.loads((root / "frontend-v3" / "package.json").read_text(encoding="utf-8"))
+    frontend_version = (root / "frontend-v3" / "src" / "version.ts").read_text(encoding="utf-8")
+    assert package["version"] == APP_VERSION
+    assert re.search(rf'APP_VERSION\s*=\s*"{re.escape(APP_VERSION)}"', frontend_version)
 
 
 # ── spec 参数化：两种平台分支都可解析 ──
@@ -120,3 +127,17 @@ def test_spec_ci_aligned():
     # 发布构建的启动冒烟失败必须阻断产物上传。
     assert "continue-on-error: true" not in ci
     assert ci.count("启动冒烟测试（发布阻断门禁）") == 2
+
+
+def test_ci_reads_the_same_instance_endpoint_as_the_application():
+    """打包冒烟必须读取当前改造版实际写入的端点文件，不能沿用 v1.1 默认名。"""
+    root = Path(__file__).resolve().parent.parent
+    main = (root / "backend" / "main.py").read_text(encoding="utf-8")
+    ci = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    lock_name = re.search(r'INSTANCE_LOCK_NAME\s*=\s*"([^"]+)"', main)
+    assert lock_name is not None
+    endpoint_name = f"{lock_name.group(1)}.endpoint.json"
+    assert ci.count(endpoint_name) >= 2
+    windows_build = (root / "scripts" / "build_windows.ps1").read_text(encoding="utf-8-sig")
+    assert endpoint_name in windows_build
+    assert "启动器会拉起独立服务子进程后退出" in windows_build

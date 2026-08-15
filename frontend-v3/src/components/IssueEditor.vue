@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
 import { api, type Issue, type IssueChanges, type IssueStatus } from "../api/client";
@@ -24,7 +24,7 @@ const emit = defineEmits<{
 
 const saving = ref(false);
 const draft = reactive<IssueChanges>({
-  department: "", category: "", defect_type: "", defect_desc: "", amount: "", regulation_basis: "", suggestion: "", author: "", reviewer: "",
+  department: "", category: "", defect_type: "", defect_desc: "", amount: "", currency: "CNY", amount_unit: "元", regulation_basis: "", suggestion: "", author: "", reviewer: "",
 });
 const savedSignature = ref("");
 let syncingDraft = false;
@@ -59,12 +59,27 @@ function formatNo(seq: number | string): string {
   return formatIssueNo(seq, props.issueNumberRule);
 }
 
+// 审查 F2 修复：金额是否可设置币种/单位。老项目可能保留“120万”等自由文本，
+// 自由文本期间币种/单位下拉禁用并提示（防用户修改被静默丢弃），金额改为数字后自动解锁。
+const STRUCTURED_AMOUNT_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
+const amountIsStructured = computed(() => !draft.amount.trim() || STRUCTURED_AMOUNT_RE.test(draft.amount.trim()));
+const amountFreeTextHint = computed(() =>
+  amountIsStructured.value ? "" : "金额为自由文本时不可修改币种/单位，请先将金额改为数字",
+);
+
 function draftValues(): IssueChanges {
-  return {
+  const values: IssueChanges = {
     department: draft.department, category: draft.category, defect_type: draft.defect_type, defect_desc: draft.defect_desc,
     amount: draft.amount, regulation_basis: draft.regulation_basis, suggestion: draft.suggestion,
     author: draft.author, reviewer: draft.reviewer,
   };
+  // 老项目可能保留“120万”等自由文本；未人工改为数字前不要因编辑其他字段
+  // 误触结构化校验。新输入及清空金额都走后端的两位小数/币种/单位校验。
+  if (amountIsStructured.value) {
+    values.currency = draft.currency || "CNY";
+    values.amount_unit = draft.amount_unit || "元";
+  }
+  return values;
 }
 
 function draftSignature(): string {
@@ -81,7 +96,7 @@ function syncDraft(issue: Issue): void {
   syncingDraft = true;
   Object.assign(draft, {
     department: issue.department ?? "", category: issue.category ?? "", defect_type: issue.defect_type ?? "", defect_desc: issue.defect_desc ?? "",
-    amount: issue.amount ?? "", regulation_basis: issue.regulation_basis ?? "", suggestion: issue.suggestion ?? "",
+    amount: issue.amount ?? "", currency: issue.currency || "CNY", amount_unit: issue.amount_unit || "元", regulation_basis: issue.regulation_basis ?? "", suggestion: issue.suggestion ?? "",
     author: issue.author ?? "", reviewer: issue.reviewer ?? "",
   });
   savedSignature.value = draftSignature();
@@ -95,6 +110,18 @@ watch(draft, () => {
 watch(() => props.autoSaveMode, () => {
   clearScheduledSave();
   if (dirty.value && !isArchived.value) scheduleAutoSave();
+});
+
+onMounted(() => {
+  if (!props.isNew || props.issue.amount.trim()) return;
+  void api.amountSettings().then((settings) => {
+    // 只初始化空白新底稿，不能覆盖用户已输入或历史项目原有口径。
+    if (props.isNew && !draft.amount.trim() && !dirty.value) {
+      draft.currency = settings.currency;
+      draft.amount_unit = settings.amount_unit;
+      savedSignature.value = draftSignature();
+    }
+  }).catch(() => undefined);
 });
 
 function errorMessage(error: unknown): string {
@@ -230,7 +257,12 @@ async function transition(target: IssueStatus): Promise<void> {
 }
 
 onBeforeUnmount(clearScheduledSave);
-defineExpose({ confirmLeave });
+// beforeunload 不能等待确认弹窗，向工作区暴露同步脏状态，由浏览器显示原生离开提示。
+function hasUnsavedChanges(): boolean {
+  return dirty.value || (props.isNew && missingRequired.value.length > 0);
+}
+
+defineExpose({ confirmLeave, hasUnsavedChanges });
 </script>
 
 <template>
@@ -245,16 +277,42 @@ defineExpose({ confirmLeave });
     <div class="form-grid">
       <label>所属版块 *<el-select v-model="draft.department" :disabled="isArchived" filterable allow-create default-first-option placeholder="选择或输入版块"><el-option v-for="department in departments" :key="department" :label="department" :value="department" /></el-select></label>
       <label>缺陷定性 *<el-input v-model="draft.defect_type" :disabled="isArchived" placeholder="例如：电费回收不及时" /></label>
-      <label>问题金额<el-input v-model="draft.amount" :disabled="isArchived" placeholder="例如：120万" /></label>
+      <label>问题金额
+        <div class="amount-inputs">
+          <el-input v-model="draft.amount" :disabled="isArchived" inputmode="decimal" placeholder="例如：120.00" />
+          <el-select v-model="draft.currency" :disabled="isArchived || !amountIsStructured" aria-label="币种" :title="amountFreeTextHint"><el-option label="CNY" value="CNY" /><el-option label="USD" value="USD" /><el-option label="EUR" value="EUR" /><el-option label="HKD" value="HKD" /></el-select>
+          <el-select v-model="draft.amount_unit" :disabled="isArchived || !amountIsStructured" aria-label="金额单位" :title="amountFreeTextHint"><el-option label="元" value="元" /><el-option label="万元" value="万元" /><el-option label="亿元" value="亿元" /></el-select>
+          <span v-if="amountFreeTextHint" class="amount-free-text-hint">{{ amountFreeTextHint }}</span>
+        </div>
+      </label>
       <label>问题分类<el-select v-model="draft.category" :disabled="isArchived" filterable allow-create default-first-option clearable placeholder="选择或输入分类"><el-option v-for="category in categories" :key="category" :label="category" :value="category" /></el-select></label>
     </div>
-    <label class="field">缺陷描述<el-input v-model="draft.defect_desc" :disabled="isArchived" type="textarea" :rows="5" /></label>
-    <label class="field">制度依据<el-input v-model="draft.regulation_basis" :disabled="isArchived" type="textarea" :rows="4" /></label>
-    <label class="field">审计建议<el-input v-model="draft.suggestion" :disabled="isArchived" type="textarea" :rows="4" /></label>
+    <label class="field">缺陷描述<el-input v-model="draft.defect_desc" :disabled="isArchived" type="textarea" :autosize="{ minRows: 5, maxRows: 50 }" /></label>
+    <label class="field">制度依据<el-input v-model="draft.regulation_basis" :disabled="isArchived" type="textarea" :autosize="{ minRows: 4, maxRows: 50 }" /></label>
+    <label class="field">审计建议<el-input v-model="draft.suggestion" :disabled="isArchived" type="textarea" :autosize="{ minRows: 4, maxRows: 50 }" /></label>
     <div class="form-grid author-reviewer"><label>编制人<el-input v-model="draft.author" :disabled="isArchived" /></label><label>审核人<el-input v-model="draft.reviewer" :disabled="isArchived" /></label></div>
     <div class="editor-footer">
       <span :class="{ 'editor-dirty': dirty }">{{ saveStateText }}</span>
-      <div class="editor-footer-actions"><VersionHistory :issue="issue" :before-restore="prepareVersionRestore" @restored="(fresh) => emit('updated', fresh)" /><span class="status-actions footer-status-actions"><el-button v-for="target in allowed" :key="target" size="small" :loading="saving" :type="target === '已归档' ? 'info' : target === '已复核' ? 'success' : target === '复核退回' ? 'warning' : 'primary'" @click="transition(target)">{{ issue.status === '已归档' && target === '编制完成' ? '归档后编辑' : target }}</el-button></span><el-button size="small" type="danger" plain :loading="saving" @click="emit('deleteRequested', issue)">删除底稿</el-button><el-button size="small" type="primary" :disabled="isArchived" :loading="saving" @click="save">保存</el-button></div>
+      <div class="editor-footer-actions"><VersionHistory :issue="issue" :before-restore="prepareVersionRestore" @restored="(fresh) => emit('updated', fresh)" /><span class="status-actions footer-status-actions"><el-button v-for="target in allowed" :key="target" size="small" :loading="saving" :type="target === '已归档' ? 'info' : target === '已复核' ? 'success' : target === '复核退回' ? 'warning' : 'primary'" @click="transition(target)">{{ issue.status === '已归档' && target === '编制完成' ? '归档后编辑' : target }}</el-button></span><el-button size="small" type="danger" plain :loading="saving" @click="emit('deleteRequested', issue)">移入回收站</el-button><el-button size="small" type="primary" :disabled="isArchived" :loading="saving" @click="save">保存</el-button></div>
     </div>
   </article>
 </template>
+
+<style scoped>
+.amount-inputs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 88px 82px;
+  gap: 6px;
+}
+
+.amount-free-text-hint {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  color: var(--el-color-warning, #e6a23c);
+  line-height: 1.4;
+}
+
+@media (max-width: 760px) {
+  .amount-inputs { grid-template-columns: 1fr; }
+}
+</style>

@@ -9,6 +9,8 @@
 - 删除与序号重排
 """
 
+import hashlib
+
 import pytest
 
 
@@ -80,6 +82,46 @@ def test_attachment_index(proj, tmp_path):
     assert proj.get_file(f2["id"])["orig_name"] == "证据-改.pdf"
 
 
+def test_attachment_stream_verified_digest_avoids_rehash_after_copy(proj, tmp_path, monkeypatch):
+    """API 流式接收已得出摘要时，数据层不再重复完整读取已复制附件。"""
+    uid = proj.add_unit("华电集团XX电厂", "张三")
+    source = tmp_path / "已核验附件.pdf"
+    payload = b"stream-verified-content"
+    source.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+
+    def unexpected_rehash(_path):
+        raise AssertionError("已核验的暂存文件不应在复制后再次完整哈希")
+
+    monkeypatch.setattr(proj, "_sha256", unexpected_rehash)
+    record = proj.add_file(
+        uid, source, "张三", verified_sha256=digest, verified_size=len(payload),
+    )
+    assert record["sha256"] == digest
+    assert record["size"] == len(payload)
+
+
+def test_issue_attachment_counts_remain_correct_with_shared_files(proj, tmp_path):
+    """聚合计数替代关联子查询后，列表、树与汇总仍准确反映共享证据。"""
+    uid = proj.add_unit("华电集团XX电厂", "张三")
+    first = proj.add_issue(uid, "张三")
+    second = proj.add_issue(uid, "张三")
+    source = tmp_path / "共享证据.pdf"
+    source.write_bytes(b"shared")
+    evidence = proj.add_file(uid, source, "张三")
+    proj.link_file(first, evidence["id"], "张三")
+    proj.link_file(second, evidence["id"], "张三")
+
+    assert [item["file_count"] for item in proj.list_issues(uid)] == [1, 1]
+    assert [item["file_count"] for item in proj.list_issues_by_unit()[uid]] == [1, 1]
+    assert [item["file_count"] for item in proj.summary()["issues"]] == [1, 1]
+    assert proj.files_for_issue(first)[0]["ref_count"] == 2
+    grouped_files = proj.files_for_issues([second, first, second])
+    assert list(grouped_files) == [second, first]
+    assert grouped_files[first][0]["id"] == evidence["id"]
+    assert grouped_files[second][0]["id"] == evidence["id"]
+
+
 def test_audit_log_trace(proj, tmp_path):
     uid = proj.add_unit("华电集团XX电厂", "张三")
     iid = proj.add_issue(uid, "张三", department="营销管理", defect_type="电费回收不及时")
@@ -100,15 +142,17 @@ def test_audit_log_trace(proj, tmp_path):
     assert any("修改字段" in l["detail"] for l in logs)
 
 
-def test_delete_and_renumber(proj, tmp_path):
+def test_delete_releases_number_without_renumbering_existing_issues(proj, tmp_path):
     uid = proj.add_unit("华电集团XX电厂", "张三")
     iid = proj.add_issue(uid, "张三")
-    proj.add_issue(uid, "张三")
+    second = proj.add_issue(uid, "张三")
     proj.delete_issue(iid, "张三")
-    assert proj.list_issues(uid)[0]["seq"] == 1  # 序号重排
+    assert proj.get_issue(second)["seq"] == 2  # 保持已有编号，不追溯改号
+    third = proj.add_issue(uid, "张三")
+    assert proj.get_issue(third)["seq"] == 1  # 释放后的最小号可复用
     assert (proj.root / "附件库" / f"unit_{uid}").is_dir()
     proj.delete_unit(uid, "张三")
-    assert not (proj.root / "附件库" / f"unit_{uid}").exists()
+    assert (proj.root / "附件库" / f"unit_{uid}").exists(), "单位进入回收站不得物理删除附件"
 
 
 def test_project_meta(proj):

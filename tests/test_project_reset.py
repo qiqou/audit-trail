@@ -1,6 +1,6 @@
 """重置项目（清空全部数据）与重启程序接口测试（V3.2）。
 
-- 重置：确认文字必须与项目名称一致（防误触）；清空单位/底稿/附件/日志，
+- 重置：确认文字必须与项目名称一致（防误触）；清空业务数据但永久保留日志，
   保留版块预设等配置；附件库与输出目录物理清空；留痕一条「重置项目」。
 - 重启：接口返回 200 并触发调度（不真重启进程，monkeypatch 拦下）。
 """
@@ -65,7 +65,7 @@ def test_reset_requires_project_name_confirmation(client, tmp_path):
 
 
 def test_reset_clears_all_data(client, tmp_path):
-    """重置后：单位/底稿/附件/输出全空，预设保留，留痕可查。"""
+    """重置后：业务数据/输出全空，预设和完整历史日志保留。"""
     t = _login(client)
     created = _create_project_with_data(client, t, tmp_path)
     # 手工造物理附件与旧导出文件
@@ -74,6 +74,7 @@ def test_reset_clears_all_data(client, tmp_path):
     (att_unit / "证据.pdf").write_bytes(b"evidence")
     (created / "输出" / "旧导出.xlsx").write_bytes(b"x")
 
+    logs_before = client.get("/api/logs", headers=_h(t)).json()
     r = client.post("/api/project/reset", json={"confirm_text": "重置源项目"}, headers=_h(t))
     assert r.status_code == 200
 
@@ -90,6 +91,10 @@ def test_reset_clears_all_data(client, tmp_path):
     # 留痕
     logs = client.get("/api/logs", headers=_h(t)).json()
     assert any(log["action"] == "重置项目" for log in logs)
+    assert len(logs) == len(logs_before) + 1
+    assert any(log["action"] == "新建底稿" for log in logs), "历史日志不得因重置丢失"
+    reset_log = next(log for log in logs if log["action"] == "重置项目")
+    assert "历史操作日志永久保留" in reset_log["detail"]
     # 数据表核实：files / issue_versions 已清空
     from database import AuditProject
 

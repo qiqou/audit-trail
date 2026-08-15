@@ -8,52 +8,84 @@
 - 前端静态资源在 frontend-v3/dist，根路径挂载。
 """
 
+import hashlib
 import json
 import os
 import shutil
-import subprocess
+import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import traceback
 import uuid
 from contextvars import ContextVar
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 # 兼容两种启动方式：`python backend/main.py` 与 `uvicorn main:app`（根目录转发）
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from api_models import (
+    AmountSettingsReq,
+    BackupSettingsReq,
+    BatchRenameReq,
+    CategoryReq,
+    CreateReq,
+    DeptReq,
+    ExchangeCloseReq,
+    ExchangeCommentReq,
+    ExchangeRequestReq,
+    ExchangeRequestUpdateReq,
+    ExchangeRevisionDecisionReq,
+    ExchangeRevisionReq,
+    ExportReq,
+    FolderReq,
+    IssueNumberReq,
+    IssueReq,
+    LocalBackupRestoreReq,
+    LocalMergeReq,
+    MoveFileReq,
+    NameReq,
+    OpenReq,
+    OperatorReq,
+    PackageReq,
+    RecoveryPointRestoreReq,
+    ResetReq,
+    StatusReq,
+)
+from app_launcher import launch_service, serve_app
 from config import PROJECT_EXT, RuntimeSettings
 from database import OUT_DIR, AuditProject
 from jobs import JobContext, job_runner
 from platform_adapter import (
+    OSIdentity,
     PlatformError,
-    acquire_single_instance,
-    discover_instance_endpoint,
+    current_os_identity,
     forget_recent,
     harden_project,
     load_recent_all,
-    open_browser,
     open_path,
-    release_single_instance,
     remember_recent,
-    reserve_local_port,
-    write_instance_endpoint,
+    spawn_detached,
 )
 from platform_adapter import (
     choose_folder as platform_choose_folder,
 )
+from runtime_log import install_unhandled_error_handler, log_runtime_event
 
 SETTINGS = RuntimeSettings.from_environment()
 HOST = SETTINGS.host
+# 改造版独立于原审迹 v1.1 的单实例锁和端点记录。仅改端口还不够：若共用
+# shenji.lock，启动器会把原版实例误认为当前版本并直接打开它的页面。
+INSTANCE_LOCK_NAME = "shenji-v11-upgrade.lock"
 # 打包环境（PyInstaller）与开发环境均只加载 V3 正式前端。
 if getattr(sys, "_MEIPASS", None):
     V3_FRONTEND_DIR = Path(sys._MEIPASS) / "frontend-v3" / "dist"
@@ -70,7 +102,6 @@ if not FRONTEND_DIR.is_dir():
 
 def _sha256_of(path) -> str:
     """计算文件 sha256（上传查重用）。"""
-    import hashlib
     h = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(65536), b""):
@@ -83,26 +114,74 @@ def _folder_fingerprint(folder_files: list) -> str:
 
     目录结构或任一文件内容不同 → 指纹不同；目录结构相同且文件内容一致 → 判重。
     """
-    import hashlib
     parts = []
-    for rel, tmp in folder_files:
-        parts.append(f"{rel.replace(chr(92), '/')}\t{_sha256_of(tmp)}")
+    for item in folder_files:
+        rel, tmp = item[:2]
+        # 上传流已得到成员摘要时直接复用；历史/导入调用保留落盘后计算的兼容路径。
+        member_sha = item[2] if len(item) > 2 else _sha256_of(tmp)
+        parts.append(f"{rel.replace(chr(92), '/')}\t{member_sha}")
     parts.sort()
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
 app = FastAPI(title="审迹", docs_url="/api/docs", openapi_url="/api/openapi.json")
 
+
+@app.exception_handler(InterruptedError)
+async def _handle_interrupted(_request: Request, exc: InterruptedError) -> JSONResponse:
+    """I5：同步任务被取消或等待超时统一转 409，不再泄漏为 500。"""
+    return JSONResponse(status_code=409, content={"detail": str(exc) or "任务已取消"})
+# 仅监听回环地址不足以阻断 DNS rebinding：浏览器仍可能将 evil.example 的 Host
+# 请求送到本地端口。明确拒绝非本机 Host；testserver 仅供 FastAPI TestClient。
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
+install_unhandled_error_handler(app)
+
 # 会话表：token → 会话上下文（使用人 + 该会话打开的项目）。
-# 每个会话独立持有项目，互不干扰（审查 F-03 修复：项目不再全局共享）。
+# 每个会话独立持有项目；同一项目同时只允许一个会话写入，避免第二标签页
+# 或第二浏览器连接造成 SQLite 并发写入。
 # 启动弹窗登录换取 token（HTTP header 只传 ASCII 安全值，中文直接放 header
 # 会被 Latin-1 解码成乱码，浏览器 fetch 也会拒绝）。
 class SessionContext:
-    def __init__(self, operator: str):
+    def __init__(self, token: str, operator: str, identity: OSIdentity):
+        self.token = token
+        self.identity = identity
+        # 使用人姓名是审计留痕的主字段，由现场人员明确输入；OS 账户仅作为
+        # 第二道来源核验字段写入同一条日志，不能替代业务上的责任人署名。
         self.operator = operator
         self.project: AuditProject | None = None
+        self.project_key = ""
+        self.last_seen = time.monotonic()
+        self.archive_preflights: dict[str, dict] = {}
+        self.merge_preflights: dict[str, dict] = {}
+        # 项目租约被其他会话接管（体验优化：强制切换而非拒绝打开）；
+        # 心跳响应携带一次 project_preempted，前端据此提示并返回项目列表。
+        self.preempted = False
 
 
 _sessions: dict[str, SessionContext] = {}
+_project_leases: dict[str, str] = {}
+_project_leases_lock = threading.RLock()
+PROJECT_LEASE_SECONDS = 45
+SESSION_TTL_SECONDS = 8 * 60 * 60
+MAX_SESSIONS = 20
+
+
+def _expire_sessions(now: float | None = None) -> int:
+    """回收过期或超出容量的浏览器会话，并释放其项目连接与单写租约。"""
+    current = time.monotonic() if now is None else now
+    stale = [ctx for ctx in _sessions.values() if current - ctx.last_seen >= SESSION_TTL_SECONDS]
+    survivors = [ctx for ctx in _sessions.values() if ctx not in stale]
+    overflow = max(0, len(survivors) - MAX_SESSIONS)
+    if overflow:
+        stale.extend(sorted(survivors, key=lambda ctx: ctx.last_seen)[:overflow])
+    for ctx in stale:
+        # 后台任务仍使用此项目连接时不能直接 close；保留会话到任务结束，再由下一次
+        # 清理回收，避免扫描/备份线程访问已关闭数据库。
+        if ctx.project is not None and job_runner.has_active(ctx.project):
+            ctx.last_seen = current
+            continue
+        if _sessions.pop(ctx.token, None) is not None:
+            _close_session_project(ctx)
+    return len(stale)
 
 # 当前请求的会话上下文（HTTP 中间件设置，请求上下文链内传播）
 _ctx_var: "ContextVar[SessionContext | None]" = ContextVar("audit_ctx", default=None)
@@ -125,51 +204,27 @@ async def _audit_session_middleware(request, call_next):
         _ctx_var.reset(context_token)
 
 
-# ───────────────────────── 依赖 ─────────────────────────
-
-class OperatorReq(BaseModel):
-    operator: str
-
-
-class FolderReq(BaseModel):
-    path: str
-
-
-class ExportReq(BaseModel):
-    scope: str = "project"   # unit / project
-    unit_id: int = None
-
-
-class PackageReq(BaseModel):
-    scope: str = "all"            # all / selected
-    unit_ids: list[int] = Field(default_factory=list)
-    group_by_dept: bool = False   # 是否按版块分类（三级目录）
-
-
-class DeptReq(BaseModel):
-    departments: list[str] = Field(default_factory=list)
-
-
-class CategoryReq(BaseModel):
-    categories: list[str] = Field(default_factory=list)
-
-
 @app.post("/api/session")
 def login(req: OperatorReq):
-    """登录：输入使用人，换取会话 token。不登录无法调用任何业务接口。"""
-    op = req.operator.strip()
-    if not op:
-        raise HTTPException(status_code=400, detail="使用人不能为空")
+    """建立本地会话：现场人员姓名为主留痕，OS 账户作为第二道核验。"""
+    operator = req.operator.strip()
+    if not operator:
+        raise HTTPException(status_code=400, detail="使用人姓名不能为空")
+    _expire_sessions()
+    identity = current_os_identity()
     token = uuid.uuid4().hex
-    _sessions[token] = SessionContext(op)
-    return {"token": token, "operator": op}
+    _sessions[token] = SessionContext(token, operator, identity)
+    return {"token": token, "operator": operator,
+            "account_id": identity.account_id, "device_id": identity.device_id}
 
 
 def get_operator(x_session: str = Header(default="")) -> str:
     """强制使用人：会话 token 缺失或无效直接拒绝；同时把会话上下文挂到当前请求。"""
+    _expire_sessions()
     ctx = _sessions.get(x_session.strip())
     if not ctx:
         raise HTTPException(status_code=400, detail="使用人会话无效，请重新启动程序并输入使用人")
+    ctx.last_seen = time.monotonic()
     _ctx_var.set(ctx)
     return ctx.operator
 
@@ -177,18 +232,29 @@ def get_operator(x_session: str = Header(default="")) -> str:
 @app.get("/api/session")
 def current_session(operator: str = Depends(get_operator)):
     """校验浏览器保存的本地会话；服务重启后前端据此重新要求输入使用人。"""
-    return {"operator": operator}
+    ctx = _ctx_var.get()
+    assert ctx is not None
+    if ctx.project is not None:
+        _maybe_schedule_auto_backup(ctx.project, operator)
+    result: dict[str, object] = {"operator": operator, "account_id": ctx.identity.account_id,
+                                 "device_id": ctx.identity.device_id}
+    # 项目租约被其他会话接管：一次性通知前端（体验优化：强制切换而非拒绝）
+    if ctx.preempted:
+        result["project_preempted"] = True
+        ctx.preempted = False
+    return result
 
 
 @app.delete("/api/session")
 def logout(x_session: str = Header(default="")):
     """显式释放当前会话及其数据库连接，避免频繁切换使用人造成资源累积。"""
-    ctx = _sessions.pop(x_session.strip(), None)
+    ctx = _sessions.get(x_session.strip())
     if ctx is None:
         raise HTTPException(status_code=400, detail="使用人会话无效，请重新进入工作台")
-    if ctx.project is not None:
-        ctx.project.close()
-        ctx.project = None
+    if ctx.project is not None and job_runner.has_active(ctx.project):
+        raise HTTPException(status_code=409, detail="项目仍在执行后台任务，请等待完成或先取消任务后退出")
+    _sessions.pop(x_session.strip(), None)
+    _close_session_project(ctx)
     return {"ok": True}
 
 
@@ -197,7 +263,35 @@ def get_project() -> AuditProject:
     ctx = _ctx_var.get()
     if ctx is None or ctx.project is None:
         raise HTTPException(status_code=400, detail="请先打开或创建项目")
-    return ctx.project
+    proj = ctx.project
+    # I2 修复：合并/导入换库交换窗口内短暂等待，避免读请求命中已关闭连接
+    if getattr(proj, "_swapping", False):
+        for _ in range(60):  # 最长约 3 秒
+            if not getattr(proj, "_swapping", False):
+                break
+            time.sleep(0.05)
+        else:
+            raise HTTPException(status_code=409, detail="项目正在合并或导入中，请稍后重试")
+    return proj
+
+
+def _require_project_idle(proj: AuditProject) -> None:
+    """删除/恢复不能与当前项目的扫描、备份、合并或归档同时发生。"""
+    if job_runner.has_active(proj):
+        raise HTTPException(status_code=409, detail="项目正在执行扫描、备份、合并或归档任务，请完成后再操作回收站")
+
+
+def _require_current_project_idle_before_switch(ctx: SessionContext, next_key: str) -> None:
+    """切换项目不得关闭仍有后台任务的当前连接。"""
+    if ctx.project is not None and ctx.project_key and ctx.project_key != next_key and job_runner.has_active(ctx.project):
+        raise HTTPException(status_code=409, detail="当前项目仍在执行后台任务，请完成或取消后再切换项目")
+
+
+def _bind_project_identity(project: AuditProject, ctx: SessionContext) -> None:
+    """把当前会话的 OS 账户元数据绑定到项目，后续日志无需逐接口传参。"""
+    project.set_audit_identity(ctx.identity.account_id, ctx.identity.device_id)
+    ctx.archive_preflights.clear()
+    ctx.merge_preflights.clear()
 
 
 def _project_info() -> dict:
@@ -209,46 +303,105 @@ def _project_info() -> dict:
     }
 
 
-# ───────────────────────── 请求模型 ─────────────────────────
+def _auto_backup_due(settings: dict, interval_minutes: int) -> bool:
+    """自动备份是否到期（I4 修复：失败也参与冷却）。
 
-class OpenReq(BaseModel):
-    path: str
-
-
-class CreateReq(BaseModel):
-    path: str
-    name: str = ""
-
-
-class NameReq(BaseModel):
-    name: str
-
-
-class ResetReq(BaseModel):
-    confirm_text: str
-
-
-class IssueNumberReq(BaseModel):
-    prefix: str = ""
-    suffix: str = ""
-
-
-class IssueReq(BaseModel):
-    """底稿字段请求体。
-
-    所有字段 Optional：新建（POST）时未传即空；更新（PATCH）时只更新
-    显式提交的字段，绝不把未提交字段清空（审查 F-02 修复）。
+    以最近一次成功或失败时间为基准，间隔未到不重试——持久性故障
+    （磁盘满/上限过小）下避免每次刷新工作台都触发完整备份并占用写锁。
     """
-    department: str | None = None
-    category: str | None = None
-    defect_type: str | None = None
-    defect_desc: str | None = None
-    amount: str | None = None
-    regulation_basis: str | None = None
-    suggestion: str | None = None
-    author: str | None = None
-    reviewer: str | None = None
-    status: str | None = None
+    last_success = str(settings.get("last_success_at") or "")
+    last_error_at = str(settings.get("last_error_at") or "")
+    candidates = [value for value in (last_success, last_error_at) if value]
+    if not candidates:
+        return True
+    # 以最近一次成功或失败（较新者）为基准计算冷却
+    base = max(candidates)
+    try:
+        base_epoch = time.mktime(time.strptime(base, "%Y-%m-%d %H:%M:%S"))
+    except ValueError:
+        return True
+    return time.time() - base_epoch >= interval_minutes * 60
+
+
+def _maybe_schedule_auto_backup(proj: AuditProject, operator: str, *, force: bool = False) -> dict | None:
+    """由工作台心跳触发到期检查；同一项目同时只允许一个自动备份任务。"""
+    settings = proj.get_backup_settings()
+    if not settings["enabled"]:
+        return None
+    if not force and not _auto_backup_due(settings, settings["interval_minutes"]):
+        return None
+    active = any(
+        job["type"] == "auto_backup" and job["status"] in {AuditProject.JOB_QUEUED, AuditProject.JOB_RUNNING}
+        for job in proj.list_jobs(limit=100)
+    )
+    if active:
+        return None
+    job = proj.create_job("auto_backup", {"target_dir": settings["target_dir"]})
+
+    def run_backup(job_ctx: JobContext) -> dict:
+        from export import create_incremental_recovery_point
+
+        try:
+            result = create_incremental_recovery_point(
+                proj,
+                target_dir=settings["target_dir"],
+                retention_days=settings["retention_days"],
+                max_bytes=settings["max_bytes"],
+                progress=job_ctx.progress,
+                cancelled=job_ctx.cancelled,
+            )
+            detail = (
+                f"新增对象 {result['copied_objects']} 个、复用对象 {result['reused_objects']} 个、"
+                f"新增 {result['copied_bytes']} 字节"
+            )
+            proj.record_auto_backup_result(
+                success=True, operator=operator, target=result["recovery_point"], message=detail,
+            )
+            return result
+        except Exception as e:
+            proj.record_auto_backup_result(success=False, message=str(e), operator=operator)
+            raise
+
+    return job_runner.submit(proj, job["id"], run_backup)
+
+
+def _project_key(path: Path) -> str:
+    """项目锁的规范化路径；不存在的创建目标也能得到稳定键。"""
+    return str(path.resolve())
+
+
+def _reserve_project(ctx: SessionContext, key: str) -> None:
+    """抢占同项目单写会话锁。
+
+    体验优化（接管语义）：其他会话已打开同一项目时不再 409 拒绝，而是
+    强制接管——吊销对方项目连接（防止双写同一 SQLite），对方通过心跳
+    感知 project_preempted 后提示并返回项目列表，实现"新窗口强制切换"。
+    """
+    with _project_leases_lock:
+        owner = _project_leases.get(key)
+        if owner and owner != ctx.token:
+            owner_ctx = _sessions.get(owner)
+            if owner_ctx is not None:
+                # 吊销旧会话项目连接；其后续写请求会因项目未打开而得到明确错误
+                try:
+                    _close_session_project(owner_ctx, preserve_key=key)
+                except Exception as exc:
+                    log_runtime_event(
+                        "warning", "lease_preempt_close_failed",
+                        message="接管项目租约时关闭旧会话项目失败",
+                        error_type=type(exc).__name__, detail=str(exc),
+                    )
+                owner_ctx.preempted = True
+        _project_leases[key] = ctx.token
+
+
+def _release_project_lease(ctx: SessionContext, key: str = "") -> None:
+    target = key or ctx.project_key
+    if not target:
+        return
+    with _project_leases_lock:
+        if _project_leases.get(target) == ctx.token:
+            _project_leases.pop(target, None)
 
 
 # ───────────────────────── 项目 ─────────────────────────
@@ -266,16 +419,34 @@ def open_project(req: OpenReq, operator: str = Depends(get_operator)):
             p = candidate
     if not p.is_dir():
         raise HTTPException(status_code=404, detail=f"项目文件夹不存在：{p}")
-    _close_current_project()
     ctx = _ctx_var.get()
     assert ctx is not None  # get_operator 依赖已确保会话存在
+    key = _project_key(p)
+    _require_current_project_idle_before_switch(ctx, key)
+    _reserve_project(ctx, key)
     try:
-        ctx.project = AuditProject(p)
+        # 先成功打开候选项目，再关闭当前项目。目录无权限、文件被占用等失败时，
+        # 当前正在编辑的项目仍可继续使用，不能因一次“最近项目”点击而丢失会话。
+        opened_project = AuditProject(p)
     except ValueError as e:
+        if ctx.project_key != key:
+            _release_project_lease(ctx, key)
         # 版本兼容检查（T12）：更新版本创建的项目拒绝打开，给可执行提示
         raise HTTPException(status_code=400, detail=str(e))
-    ctx.project.log(operator, "打开项目", str(p))
-    remember_recent(operator, str(p), ctx.project.project_name)
+    except (OSError, sqlite3.Error) as e:
+        if ctx.project_key != key:
+            _release_project_lease(ctx, key)
+        raise HTTPException(
+            status_code=400,
+            detail=f"无法打开项目「{p}」：{e}。请确认该文件夹存在、当前账户具有读取和写入权限，且未被其他程序锁定后重试",
+        ) from e
+    _close_current_project(preserve_key=key)
+    ctx.project = opened_project
+    ctx.project_key = key
+    ctx.preempted = False
+    _bind_project_identity(opened_project, ctx)
+    opened_project.log(operator, "打开项目", str(p))
+    remember_recent(operator, str(p), opened_project.project_name)
     return _project_info()
 
 
@@ -304,10 +475,22 @@ def create_project(req: CreateReq, operator: str = Depends(get_operator)):
                 except OSError:
                     pass
         p = target
-    _close_current_project()
     ctx = _ctx_var.get()
     assert ctx is not None  # get_operator 依赖已确保会话存在
-    ctx.project = AuditProject(p)
+    key = _project_key(p)
+    _require_current_project_idle_before_switch(ctx, key)
+    _reserve_project(ctx, key)
+    try:
+        opened_project = AuditProject(p)
+    except (OSError, sqlite3.Error, ValueError):
+        if ctx.project_key != key:
+            _release_project_lease(ctx, key)
+        raise
+    _close_current_project(preserve_key=key)
+    ctx.project = opened_project
+    ctx.project_key = key
+    ctx.preempted = False
+    _bind_project_identity(ctx.project, ctx)
     name = req.name.strip()
     if name:
         ctx.project.project_name = name
@@ -332,9 +515,19 @@ def delete_project(req: OpenReq, operator: str = Depends(get_operator)):
                             detail="只能删除审迹创建的项目（目录名以 .auditproj 结尾）")
     if not p.is_dir():
         raise HTTPException(status_code=404, detail=f"项目不存在：{p}")
-    # 删除的是当前会话打开的项目时，先关闭连接再删目录
+    # 其他会话打开时不能删除，避免跨标签页把正在编辑的数据移除。
     ctx = _ctx_var.get()
-    if ctx is not None and ctx.project is not None and Path(ctx.project.root) == p:
+    key = _project_key(p)
+    if ctx is not None:
+        with _project_leases_lock:
+            owner = _project_leases.get(key)
+        if owner and owner != ctx.token:
+            owner_ctx = _sessions.get(owner)
+            if owner_ctx and time.monotonic() - owner_ctx.last_seen < PROJECT_LEASE_SECONDS:
+                raise HTTPException(status_code=409, detail="该项目正在另一个工作台标签页中使用，不能删除")
+    # 删除的是当前会话打开的项目时，先关闭连接再删目录。
+    if ctx is not None and ctx.project is not None and _project_key(Path(ctx.project.root)) == key:
+        _require_project_idle(ctx.project)
         _close_current_project()
     try:
         shutil.rmtree(p)
@@ -470,18 +663,30 @@ def global_search(q: str = "", _: str = Depends(get_operator)):
     return get_project().search(q)
 
 
-def _close_current_project():
-    """关闭当前会话持有的项目（如有）。"""
-    ctx = _ctx_var.get()
-    if ctx is None:
-        return
+def _close_session_project(ctx: SessionContext, preserve_key: str = "") -> None:
+    """关闭指定会话的项目，并释放其项目写入锁。"""
     proj = ctx.project
+    old_key = ctx.project_key
     if proj is not None:
         try:
             proj.close()
-        except Exception:
-            pass
+        except sqlite3.Error as exc:
+            # 关闭失败不能悄然吞掉；会话仍释放，但本机运行日志保留诊断线索。
+            log_runtime_event(
+                "warning", "project_close_failed", message="关闭项目连接失败",
+                error_type=type(exc).__name__, detail=str(exc),
+            )
     ctx.project = None
+    if old_key != preserve_key:
+        _release_project_lease(ctx, old_key)
+    ctx.project_key = preserve_key if old_key == preserve_key else ""
+
+
+def _close_current_project(preserve_key: str = ""):
+    """关闭当前会话持有的项目（如有）。"""
+    ctx = _ctx_var.get()
+    if ctx is not None:
+        _close_session_project(ctx, preserve_key)
 
 
 # ───────────────────────── 单位 ─────────────────────────
@@ -512,7 +717,9 @@ def rename_unit(unit_id: int, req: NameReq, operator: str = Depends(get_operator
 @app.delete("/api/units/{unit_id}")
 def delete_unit(unit_id: int, operator: str = Depends(get_operator)):
     try:
-        get_project().delete_unit(unit_id, operator)
+        proj = get_project()
+        _require_project_idle(proj)
+        proj.delete_unit(unit_id, operator)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -532,8 +739,8 @@ def list_issues(unit_id: int, _: str = Depends(get_operator)):
 def add_issue(unit_id: int, req: IssueReq, operator: str = Depends(get_operator)):
     try:
         iid = get_project().add_issue(unit_id, operator, **req.model_dump())
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=404 if isinstance(e, KeyError) else 400, detail=str(e))
     return {"id": iid}
 
 
@@ -563,12 +770,6 @@ def update_issue(issue_id: int, req: IssueReq, operator: str = Depends(get_opera
     return {"changed": changed, "issue": get_project().get_issue(issue_id)}
 
 
-class StatusReq(BaseModel):
-    """状态流转请求：status 必填；comment 在复核退回/归档后编辑时必填。"""
-    status: str
-    comment: str = ""
-
-
 @app.post("/api/issues/{issue_id}/status")
 def change_issue_status(issue_id: int, req: StatusReq, operator: str = Depends(get_operator)):
     """状态流转（T3）：矩阵校验 + 必填规则 + 留痕。非法迁移 400 且提示可走路径。"""
@@ -580,12 +781,214 @@ def change_issue_status(issue_id: int, req: StatusReq, operator: str = Depends(g
     return get_project().get_issue(issue_id)
 
 
+# ───────────────────────── 问题交流（P1-14） ─────────────────────────
+
+@app.post("/api/issues/{issue_id}/exchange")
+def start_issue_exchange(issue_id: int, operator: str = Depends(get_operator)):
+    """开始交流修订；正式底稿在此期间保持只读。"""
+    try:
+        return get_project().start_exchange_session(issue_id, operator)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@app.get("/api/exchanges/{session_uuid}")
+def get_issue_exchange(session_uuid: str, _: str = Depends(get_operator)):
+    try:
+        return get_project().get_exchange_session(session_uuid)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@app.post("/api/exchanges/{session_uuid}/revisions")
+def propose_exchange_revision(session_uuid: str, req: ExchangeRevisionReq,
+                              operator: str = Depends(get_operator)):
+    try:
+        return get_project().propose_exchange_revision(
+            session_uuid, req.field_name, req.new_value, req.reason, operator,
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.post("/api/exchanges/{session_uuid}/revisions/{revision_uuid}/decision")
+def decide_exchange_revision(session_uuid: str, revision_uuid: str,
+                             req: ExchangeRevisionDecisionReq, operator: str = Depends(get_operator)):
+    try:
+        return get_project().decide_exchange_revision(session_uuid, revision_uuid, req.decision, operator)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.post("/api/exchanges/{session_uuid}/comments")
+def add_exchange_comment(session_uuid: str, req: ExchangeCommentReq,
+                         operator: str = Depends(get_operator)):
+    try:
+        return get_project().add_exchange_comment(
+            session_uuid, req.body, req.anchor_field, req.revision_uuid, operator,
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.post("/api/exchanges/{session_uuid}/requests")
+def create_exchange_request(session_uuid: str, req: ExchangeRequestReq,
+                            operator: str = Depends(get_operator)):
+    try:
+        return get_project().create_exchange_request(session_uuid, req.content, operator)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.patch("/api/exchanges/{session_uuid}/requests/{request_uuid}")
+def update_exchange_request(session_uuid: str, request_uuid: str, req: ExchangeRequestUpdateReq,
+                            operator: str = Depends(get_operator)):
+    try:
+        return get_project().update_exchange_request(
+            session_uuid, request_uuid, req.status, req.provided_file_id, req.note, operator,
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.post("/api/exchanges/{session_uuid}/apply")
+def apply_exchange_revisions(session_uuid: str, operator: str = Depends(get_operator)):
+    try:
+        return get_project().apply_exchange_revisions(session_uuid, operator)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.post("/api/exchanges/{session_uuid}/close")
+def close_issue_exchange(session_uuid: str, req: ExchangeCloseReq,
+                         operator: str = Depends(get_operator)):
+    try:
+        return get_project().close_exchange_session(session_uuid, req.note, operator)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @app.delete("/api/issues/{issue_id}")
 def delete_issue(issue_id: int, operator: str = Depends(get_operator)):
     try:
-        get_project().delete_issue(issue_id, operator)
+        proj = get_project()
+        _require_project_idle(proj)
+        proj.delete_issue(issue_id, operator)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    return {"ok": True}
+
+
+@app.get("/api/recycle/issues")
+def list_recycled_issues(_: str = Depends(get_operator)):
+    """底稿回收站：默认永不自动清空。"""
+    return get_project().list_recycled_issues()
+
+
+@app.get("/api/recycle/issues/{recycle_id}")
+def get_recycled_issue_detail(recycle_id: int, _: str = Depends(get_operator)):
+    """只读查看已移入回收站的底稿，便于确认后恢复或物理删除。"""
+    try:
+        return get_project().get_recycled_issue_detail(recycle_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/api/recycle/issues/{recycle_id}/restore")
+def restore_recycled_issue(recycle_id: int, operator: str = Depends(get_operator)):
+    try:
+        proj = get_project()
+        _require_project_idle(proj)
+        return proj.restore_recycled_issue(recycle_id, operator)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/recycle/issues/{recycle_id}")
+def purge_recycled_issue(recycle_id: int, operator: str = Depends(get_operator)):
+    """物理清空单条底稿，仅用户在回收站内明确操作时调用。"""
+    try:
+        proj = get_project()
+        _require_project_idle(proj)
+        proj.purge_recycled_issue(recycle_id, operator)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"ok": True}
+
+
+@app.get("/api/recycle/units")
+def list_recycled_units(_: str = Depends(get_operator)):
+    return get_project().list_recycled_units()
+
+
+@app.post("/api/recycle/units/{recycle_id}/restore")
+def restore_recycled_unit(recycle_id: int, operator: str = Depends(get_operator)):
+    try:
+        proj = get_project()
+        _require_project_idle(proj)
+        return proj.restore_recycled_unit(recycle_id, operator)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/recycle/units/{recycle_id}")
+def purge_recycled_unit(recycle_id: int, operator: str = Depends(get_operator)):
+    try:
+        proj = get_project()
+        _require_project_idle(proj)
+        proj.purge_recycled_unit(recycle_id, operator)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True}
+
+
+@app.get("/api/recycle/files")
+def list_recycled_files(_: str = Depends(get_operator)):
+    return get_project().list_recycled_files()
+
+
+@app.post("/api/recycle/files/{recycle_id}/restore")
+def restore_recycled_file(recycle_id: int, operator: str = Depends(get_operator)):
+    try:
+        proj = get_project()
+        _require_project_idle(proj)
+        return proj.restore_recycled_file(recycle_id, operator)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/recycle/files/{recycle_id}")
+def purge_recycled_file(recycle_id: int, operator: str = Depends(get_operator)):
+    try:
+        proj = get_project()
+        _require_project_idle(proj)
+        proj.purge_recycled_file(recycle_id, operator)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"ok": True}
 
 
@@ -593,6 +996,8 @@ def delete_issue(issue_id: int, operator: str = Depends(get_operator)):
 
 @app.get("/api/issues/{issue_id}/versions")
 def list_versions(issue_id: int, _: str = Depends(get_operator)):
+    if not get_project().get_issue(issue_id):
+        raise HTTPException(status_code=404, detail="底稿不存在或已移入回收站")
     return get_project().list_versions(issue_id)
 
 
@@ -601,7 +1006,7 @@ def restore_version(issue_id: int, version_id: int, operator: str = Depends(get_
     try:
         get_project().restore_version(issue_id, version_id, operator)
     except (KeyError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=404 if isinstance(e, KeyError) else 400, detail=str(e))
     return {"ok": True}
 
 
@@ -684,6 +1089,7 @@ async def upload_folder(unit_id: int, folder_name: str = Form(...),
                 raise HTTPException(status_code=400, detail=str(e)) from e
             suffix = Path(rel).suffix or ".bin"
             size = 0
+            hasher = hashlib.sha256()
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tf:
                 while True:
                     chunk = await f.read(1 << 20)
@@ -704,8 +1110,9 @@ async def upload_folder(unit_id: int, folder_name: str = Form(...),
                         raise HTTPException(
                             status_code=400,
                             detail=f"文件夹总量超过上限 {human_size(MAX_EXTRACT_TOTAL)}，请拆分后再导入")
-                    tf.write(chunk)
-                tmp_items.append((rel, tf.name))
+                    await run_in_threadpool(tf.write, chunk)
+                    hasher.update(chunk)
+                tmp_items.append((rel, tf.name, hasher.hexdigest()))
         if not tmp_items:
             raise ValueError("文件夹为空")
         # 文件夹内容指纹：相对路径 + 文件内容哈希，排序后整体摘要（同目录同内容才判重）
@@ -722,7 +1129,7 @@ async def upload_folder(unit_id: int, folder_name: str = Form(...),
     except (KeyError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        for _rel, tmp in tmp_items:
+        for _rel, tmp, *_digest in tmp_items:
             Path(tmp).unlink(missing_ok=True)
     return rec
 
@@ -739,8 +1146,9 @@ async def upload_file(unit_id: int, file: UploadFile = File(...), folder_path: s
     orig = file.filename or "未命名文件"
     suffix = Path(orig).suffix or ".bin"
     size = 0
+    hasher = hashlib.sha256()
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tf:
-        # 流式写入并计数，超限提前拒绝（审查 F-07 修复）
+        # 流式写入、计数并计算摘要：避免落盘后再次完整读取临时文件。
         while True:
             chunk = await file.read(1 << 20)
             if not chunk:
@@ -753,10 +1161,11 @@ async def upload_file(unit_id: int, file: UploadFile = File(...), folder_path: s
                 raise HTTPException(
                     status_code=400,
                     detail=f"文件超过单文件上限 {human_size(MAX_FILE_SIZE)}，请拆分后再导入")
-            tf.write(chunk)
+            await run_in_threadpool(tf.write, chunk)
+            hasher.update(chunk)
         tmp_path = tf.name
     try:
-        sha = await run_in_threadpool(_sha256_of, tmp_path)
+        sha = hasher.hexdigest()
         # 项目级查重：同一实体文件只保存一份
         proj = get_project()
         dup = await run_in_threadpool(proj.find_file_by_sha, sha)
@@ -768,6 +1177,7 @@ async def upload_file(unit_id: int, file: UploadFile = File(...), folder_path: s
             }
         f = await run_in_threadpool(
             proj.add_file, unit_id, tmp_path, operator, orig_name=orig, folder_path=folder_path,
+            verified_sha256=sha, verified_size=size,
         )
     except (KeyError, FileNotFoundError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -821,24 +1231,11 @@ def rename_file(file_id: int, req: NameReq, operator: str = Depends(get_operator
     return {"ok": True}
 
 
-class RenameItem(BaseModel):
-    id: int
-    name: str
-
-
-class BatchRenameReq(BaseModel):
-    renames: list[RenameItem]
-
-
 @app.post("/api/files/batch-rename")
 def batch_rename_files(req: BatchRenameReq, operator: str = Depends(get_operator)):
     """批量重命名附件：事务内冲突检测，冲突条目跳过并返回原因（审查 F-06 补齐）。"""
     return get_project().batch_rename_files(
         [{"id": r.id, "name": r.name} for r in req.renames], operator)
-
-
-class MoveFileReq(BaseModel):
-    unit_id: int
 
 
 @app.post("/api/files/{file_id}/move")
@@ -853,7 +1250,9 @@ def move_file(file_id: int, req: MoveFileReq, operator: str = Depends(get_operat
 @app.delete("/api/files/{file_id}")
 def remove_file(file_id: int, operator: str = Depends(get_operator)):
     try:
-        get_project().remove_file(file_id, operator)
+        proj = get_project()
+        _require_project_idle(proj)
+        proj.remove_file(file_id, operator)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -872,6 +1271,8 @@ def issues_for_file(file_id: int, _: str = Depends(get_operator)):
 
 @app.get("/api/issues/{issue_id}/files")
 def files_for_issue(issue_id: int, _: str = Depends(get_operator)):
+    if not get_project().get_issue(issue_id):
+        raise HTTPException(status_code=404, detail="底稿不存在或已移入回收站")
     return get_project().files_for_issue(issue_id)
 
 
@@ -930,7 +1331,7 @@ def get_departments(_: str = Depends(get_operator)):
     try:
         val = json.loads(raw)
         return val if isinstance(val, list) else []
-    except Exception:
+    except (json.JSONDecodeError, TypeError):
         return []
 
 
@@ -942,8 +1343,10 @@ def set_departments(req: DeptReq, operator: str = Depends(get_operator)):
     # 去重保序
     seen = set()
     uniq = [d for d in depts if not (d in seen or seen.add(d))]
-    proj.set_meta("departments", json.dumps(uniq, ensure_ascii=False))
-    proj.log(operator, "更新版块预设", f"{len(uniq)} 个版块：{'、'.join(uniq[:5])}")
+    proj.set_meta_with_log(
+        "departments", json.dumps(uniq, ensure_ascii=False), operator,
+        "更新版块预设", f"{len(uniq)} 个版块：{'、'.join(uniq[:5])}",
+    )
     return uniq
 
 
@@ -962,13 +1365,11 @@ def set_issue_number(req: IssueNumberReq, operator: str = Depends(get_operator))
     """保存底稿编号规则：编号 = 前缀 + 数字序号 + 后缀。
 
     规则写入 meta（数据层），树/详情/导出台账/归档打包统一经 issue_no()
-    计算，作为唯一识别码全程一致；默认前后缀为空 = 纯数字序号。
+    计算当前展示编号；永久关联使用 issue_uuid。前后缀变更不追溯，
+    删除后的数字可复用；默认前后缀为空 = 纯数字序号。
     """
     proj = get_project()
-    proj.set_meta("issue_number_prefix", req.prefix.strip())
-    proj.set_meta("issue_number_suffix", req.suffix.strip())
-    proj.log(operator, "更新编号规则", f"前缀「{req.prefix}」后缀「{req.suffix}」")
-    return {"prefix": req.prefix.strip(), "suffix": req.suffix.strip()}
+    return proj.save_issue_number_rule(operator, req.prefix.strip(), req.suffix.strip())
 
 
 @app.get("/api/settings/categories")
@@ -978,7 +1379,7 @@ def get_categories(_: str = Depends(get_operator)):
     try:
         value = json.loads(raw)
         return value if isinstance(value, list) else []
-    except Exception:
+    except (json.JSONDecodeError, TypeError):
         return []
 
 
@@ -989,9 +1390,26 @@ def set_categories(req: CategoryReq, operator: str = Depends(get_operator)):
     categories = [item.strip() for item in req.categories if item.strip()]
     seen = set()
     unique = [item for item in categories if not (item in seen or seen.add(item))]
-    proj.set_meta("categories", json.dumps(unique, ensure_ascii=False))
-    proj.log(operator, "更新问题分类预设", f"{len(unique)} 个分类：{'、'.join(unique[:5])}")
+    proj.set_meta_with_log(
+        "categories", json.dumps(unique, ensure_ascii=False), operator,
+        "更新问题分类预设", f"{len(unique)} 个分类：{'、'.join(unique[:5])}",
+    )
     return unique
+
+
+@app.get("/api/settings/amount")
+def get_amount_settings(_: str = Depends(get_operator)):
+    return get_project().get_amount_settings()
+
+
+@app.api_route("/api/settings/amount", methods=["POST", "PUT"])
+def save_amount_settings(req: AmountSettingsReq, operator: str = Depends(get_operator)):
+    try:
+        return get_project().save_amount_settings(
+            operator, currency=req.currency, amount_unit=req.amount_unit,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 # ───────────────────────── 导入问题汇总 ─────────────────────────
@@ -1053,40 +1471,99 @@ async def import_excel(file: UploadFile = File(...), operator: str = Depends(get
 @app.post("/api/import/merge")
 async def import_merge(files: list[UploadFile] = File(...),
                        operator: str = Depends(get_operator)):
-    """合并导入：审计经理汇总多个 .auditbak 备份到当前项目（单位/底稿/附件/版块预设）。"""
-    from export import merge_backups
-    from limits import MAX_BATCH_FILES, MAX_FILE_SIZE, human_size
+    """旧上传入口已停用：正式合并需本机路径预检，避免大包限制和绕过冲突确认。"""
+    from limits import MAX_BATCH_FILES
 
     if len(files) > MAX_BATCH_FILES:
-        raise HTTPException(status_code=400,
-                            detail=f"单批最多合并 {MAX_BATCH_FILES} 个备份，当前 {len(files)} 个")
-    proj = get_project()
-    tmp_zips = []
+        raise HTTPException(
+            status_code=400,
+            detail=f"单批最多合并 {MAX_BATCH_FILES} 个备份，当前 {len(files)} 个",
+        )
+    raise HTTPException(
+        status_code=409,
+        detail="请在合并窗口逐行输入本机 .auditbak 完整路径，先完成预检并确认冲突后再合并",
+    )
+
+
+@app.post("/api/import/merge-local")
+async def import_merge_local(req: LocalMergeReq, operator: str = Depends(get_operator)):
+    """通过预检确认后从本机路径合并，适用于 50GB 场景。"""
+    from export import merge_backups, merge_preflight
+    from limits import MAX_BATCH_FILES
+
+    paths = [Path(raw.strip()).expanduser() for raw in req.backup_paths if raw.strip()]
+    if not paths:
+        raise HTTPException(status_code=400, detail="请至少输入一个 .auditbak 备份完整路径")
+    if len(paths) > MAX_BATCH_FILES:
+        raise HTTPException(status_code=400, detail=f"单批最多合并 {MAX_BATCH_FILES} 个备份，当前 {len(paths)} 个")
+    for path in paths:
+        if path.suffix.lower() != ".auditbak" or not path.is_file():
+            raise HTTPException(status_code=400, detail=f"备份文件不存在或不是 .auditbak：{path}")
+    ctx = _ctx_var.get()
+    assert ctx is not None
+    approved = ctx.merge_preflights.pop(req.confirmation_token.strip(), None)
+    if not approved:
+        raise HTTPException(status_code=409, detail="请先完成合并预检并确认冲突处理方式")
+    if approved["expires_at"] < time.monotonic():
+        raise HTTPException(status_code=409, detail="合并预检已过期，请重新预检")
+    canonical_paths = [str(path.resolve()) for path in paths]
+    if approved["project_uuid"] != get_project().project_uuid or approved["paths"] != canonical_paths:
+        raise HTTPException(status_code=409, detail="待合并来源或当前项目已变化，请重新预检")
     try:
-        for f in files:
-            if not (f.filename or "").lower().endswith(".auditbak"):
-                raise ValueError(f"{f.filename} 不是备份文件（.auditbak）")
-            size = 0
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".auditbak") as tf:
-                while True:
-                    chunk = await f.read(1 << 20)
-                    if not chunk:
-                        break
-                    size += len(chunk)
-                    if size > MAX_FILE_SIZE:
-                        Path(tf.name).unlink(missing_ok=True)
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"备份文件「{f.filename}」超过上限 {human_size(MAX_FILE_SIZE)}")
-                    tf.write(chunk)
-                tmp_zips.append(tf.name)
-        info = await run_in_threadpool(merge_backups, proj, tmp_zips, operator)
+        current = await run_in_threadpool(merge_preflight, get_project(), paths)
+        if not current["ok"]:
+            raise HTTPException(status_code=409, detail="合并预检发现阻断项，请修复来源后重新预检")
+        if (
+            current["fingerprint"] != approved["fingerprint"]
+            or current["target_fingerprint"] != approved["target_fingerprint"]
+        ):
+            raise HTTPException(status_code=409, detail="来源备份或当前项目已变化，请重新预检")
+        proj = get_project()
+        result = await run_in_threadpool(
+            job_runner.run_and_wait,
+            proj,
+            "merge_backups",
+            {"sources": canonical_paths},
+            lambda _ctx: merge_backups(proj, paths, operator),
+        )
+        proj.log(
+            operator, "确认合并备份", f"{len(paths)} 个来源",
+            f"预检冲突 {len(current['conflicts'])} 项；默认并存且已由负责人确认",
+        )
+        return result
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        for p in tmp_zips:
-            Path(p).unlink(missing_ok=True)
-    return info
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.post("/api/import/merge-local/preflight")
+async def import_merge_local_preflight(req: LocalMergeReq, _: str = Depends(get_operator)):
+    """对本机备份来源做只读预检，发现冲突先展示，确认后才允许写入。"""
+    from export import merge_preflight
+    from limits import MAX_BATCH_FILES
+
+    paths = [Path(raw.strip()).expanduser() for raw in req.backup_paths if raw.strip()]
+    if not paths:
+        raise HTTPException(status_code=400, detail="请至少输入一个 .auditbak 备份完整路径")
+    if len(paths) > MAX_BATCH_FILES:
+        raise HTTPException(status_code=400, detail=f"单批最多合并 {MAX_BATCH_FILES} 个备份，当前 {len(paths)} 个")
+    result = await run_in_threadpool(merge_preflight, get_project(), paths)
+    if result["ok"]:
+        ctx = _ctx_var.get()
+        assert ctx is not None
+        token = uuid.uuid4().hex
+        ctx.merge_preflights[token] = {
+            "project_uuid": get_project().project_uuid,
+            "paths": [str(path.resolve()) for path in paths],
+            "fingerprint": result.pop("fingerprint"),
+            "target_fingerprint": result.pop("target_fingerprint"),
+            "expires_at": time.monotonic() + 10 * 60,
+        }
+        result["confirmation_token"] = token
+    else:
+        result.pop("fingerprint", None)
+        result.pop("target_fingerprint", None)
+        result["confirmation_token"] = ""
+    return result
 
 
 # ───────────────────────── 导出 / 打包 / 备份 ─────────────────────────
@@ -1108,21 +1585,88 @@ def export_excel(req: ExportReq, operator: str = Depends(get_operator)):
 
 @app.post("/api/export/package")
 def package_project(req: PackageReq, operator: str = Depends(get_operator)):
-    """按项目结构打包 ZIP（范围：全部/勾选单位；可按版块分类）。"""
+    """通过归档核对令牌后打包 ZIP；项目变化或核对过期必须重新确认。"""
+    from export import archive_preflight
     from export import package_project as do_package
     proj = get_project()
+    ctx = _ctx_var.get()
+    assert ctx is not None
+    token = req.confirmation_token.strip()
+    approved = ctx.archive_preflights.pop(token, None) if token else None
+    if not approved:
+        raise HTTPException(status_code=409, detail="请先完成归档核对清单，再确认生成归档包")
+    if approved["expires_at"] < time.monotonic():
+        raise HTTPException(status_code=409, detail="归档核对已过期，请重新核对")
+    requested_ids = list(dict.fromkeys(req.unit_ids or []))
+    if (
+        approved["project_uuid"] != proj.project_uuid
+        or approved["scope"] != req.scope
+        or approved["unit_ids"] != requested_ids
+        or approved["group_by_dept"] != bool(req.group_by_dept)
+    ):
+        raise HTTPException(status_code=409, detail="归档范围已变化，请重新核对")
     try:
-        info = do_package(proj, scope=req.scope, unit_ids=req.unit_ids,
-                          group_by_dept=req.group_by_dept)
+        current = archive_preflight(
+            proj, scope=req.scope, unit_ids=requested_ids, group_by_dept=req.group_by_dept,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if not current["ok"]:
+        raise HTTPException(status_code=409, detail="归档核对发现阻断项，请修复后重新核对")
+    if current["fingerprint"] != approved["fingerprint"]:
+        raise HTTPException(status_code=409, detail="核对后项目数据或附件已变化，请重新核对")
+    try:
+        info = job_runner.run_and_wait(
+            proj,
+            "archive_package",
+            {"scope": req.scope, "unit_ids": requested_ids, "group_by_dept": bool(req.group_by_dept)},
+            lambda _ctx: do_package(
+                proj, scope=req.scope, unit_ids=requested_ids, group_by_dept=req.group_by_dept,
+                operator=operator,
+            ),
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     scope_name = "全部单位" if req.scope == "all" else f"勾选单位 {len(req.unit_ids)} 个"
-    proj.log(operator, "打包ZIP", info["filename"],
-             f"{scope_name}，{info['units']} 个单位、{info['issues']} 条底稿"
+    proj.log(operator, "归档核对并打包", info["filename"],
+             f"{scope_name}，{info['units']} 个单位、{info['issues']} 条底稿；"
+             f"核对警告 {len(current['warnings'])} 项"
              + ("，按版块分类" if req.group_by_dept else ""))
     return {"filename": info["filename"], "abs_path": info["abs_path"],
             "units": info["units"], "issues": info["issues"],
             "download_url": f"/api/export/file/{quote(info['filename'])}"}
+
+
+@app.post("/api/export/package/preflight")
+def package_preflight(req: PackageReq, _: str = Depends(get_operator)):
+    """生成归档核对清单。无阻断项时发放一次性确认令牌，有效期 10 分钟。"""
+    from export import archive_preflight
+
+    proj = get_project()
+    ctx = _ctx_var.get()
+    assert ctx is not None
+    selected_ids = list(dict.fromkeys(req.unit_ids or []))
+    try:
+        result = archive_preflight(
+            proj, scope=req.scope, unit_ids=selected_ids, group_by_dept=req.group_by_dept,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if result["ok"]:
+        token = uuid.uuid4().hex
+        ctx.archive_preflights[token] = {
+            "project_uuid": proj.project_uuid,
+            "scope": req.scope,
+            "unit_ids": selected_ids,
+            "group_by_dept": bool(req.group_by_dept),
+            "fingerprint": result.pop("fingerprint"),
+            "expires_at": time.monotonic() + 10 * 60,
+        }
+        result["confirmation_token"] = token
+    else:
+        result.pop("fingerprint", None)
+        result["confirmation_token"] = ""
+    return result
 
 
 @app.post("/api/backup/create")
@@ -1131,12 +1675,121 @@ def create_backup(operator: str = Depends(get_operator)):
     from export import create_backup as do_backup
     proj = get_project()
     try:
-        info = do_backup(proj)
+        info = job_runner.run_and_wait(
+            proj,
+            "manual_backup",
+            {},
+            lambda _ctx: do_backup(proj),
+        )
     except (OSError, ValueError) as e:
         raise HTTPException(status_code=400, detail=f"创建备份失败：{e}") from e
     proj.log(operator, "备份", info["filename"], f"{info['db_size']} 字节")
     return {"filename": info["filename"], "abs_path": info["abs_path"],
             "download_url": f"/api/backup/download/{quote(info['filename'])}"}
+
+
+@app.get("/api/backup/settings")
+def get_backup_settings(_: str = Depends(get_operator)):
+    return get_project().get_backup_settings()
+
+
+@app.post("/api/backup/settings")
+def save_backup_settings(req: BackupSettingsReq, operator: str = Depends(get_operator)):
+    try:
+        return get_project().save_backup_settings(
+            operator, enabled=req.enabled, target_dir=req.target_dir,
+            interval_minutes=req.interval_minutes, retention_days=req.retention_days,
+            max_bytes=req.max_bytes,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/backup/recovery-point")
+def create_auto_recovery_point(operator: str = Depends(get_operator)):
+    """手工立即创建一份增量恢复点；仍使用已保存的自动备份目标和空间策略。"""
+    proj = get_project()
+    settings = proj.get_backup_settings()
+    if not settings["enabled"]:
+        raise HTTPException(status_code=400, detail="请先在设置中开启自动备份并指定目标目录")
+    job = _maybe_schedule_auto_backup(proj, operator, force=True)
+    if job is None:
+        raise HTTPException(status_code=409, detail="自动备份正在执行，请稍后查看任务结果")
+    return {"job_id": job["id"], "status": job["status"]}
+
+
+@app.get("/api/backup/recovery-points")
+def list_auto_recovery_points(_: str = Depends(get_operator)):
+    """列出当前项目自动备份目标中的可用恢复点。"""
+    from export import list_incremental_recovery_points
+
+    proj = get_project()
+    settings = proj.get_backup_settings()
+    if not settings["target_dir"]:
+        return []
+    try:
+        return list_incremental_recovery_points(proj.project_uuid, settings["target_dir"])
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=f"读取自动备份恢复点失败：{e}") from e
+
+
+def _log_restored_project(
+    path: str, operator: str, account_id: str, device_id: str, action: str, detail: str = "",
+) -> None:
+    """恢复成功后，在新项目自己的永久日志中记录来源。"""
+    restored = AuditProject(path)
+    try:
+        restored.set_audit_identity(account_id, device_id)
+        restored.log(operator, action, path, detail)
+        # P10：恢复出的项目直接补写 manifest.json，避免恢复后清单缺失
+        restored.write_manifest()
+    finally:
+        restored.close()
+
+
+@app.post("/api/backup/recovery-points/restore")
+async def restore_auto_recovery_point(req: RecoveryPointRestoreReq, operator: str = Depends(get_operator)):
+    """从内容寻址自动备份恢复点恢复；始终写入一个新项目目录。"""
+    from export import restore_incremental_recovery_point
+
+    proj = get_project()
+    ctx = _ctx_var.get()
+    assert ctx is not None
+    settings = proj.get_backup_settings()
+    if not settings["target_dir"]:
+        raise HTTPException(status_code=400, detail="当前项目未设置自动备份目标目录")
+    target = req.target_dir.strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="恢复目标目录不能为空")
+    # 重要6 修复：恢复目标不得位于当前项目内，防止覆盖正在编辑的项目或产生嵌套项目
+    target_resolved = Path(target).expanduser().resolve()
+    project_root = Path(proj.root).resolve()
+    if target_resolved == project_root or target_resolved.is_relative_to(project_root):
+        raise HTTPException(
+            status_code=400,
+            detail="恢复目标不能位于当前项目内，请选择项目外的其他目录",
+        )
+    try:
+        info = await run_in_threadpool(
+            job_runner.run_and_wait,
+            proj,
+            "restore_recovery_point",
+            {"recovery_point_id": req.recovery_point_id, "target_dir": target},
+            lambda _ctx: restore_incremental_recovery_point(
+                project_uuid=proj.project_uuid,
+                backup_target_dir=settings["target_dir"],
+                recovery_point_id=req.recovery_point_id,
+                target_dir=target,
+            ),
+        )
+        await run_in_threadpool(
+            _log_restored_project, info["path"], operator,
+            ctx.identity.account_id, ctx.identity.device_id,
+            "恢复自动备份", f"恢复点：{req.recovery_point_id}"
+        )
+        return {"path": info["path"]}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @app.get("/api/backup/download/{filename}")
@@ -1182,21 +1835,64 @@ async def restore_backup(file: UploadFile = File(...), target_dir: str = Form(..
                 )
             tf.write(chunk)
     try:
-        info = await run_in_threadpool(do_restore, tmp_bak, target)
+        ctx = _ctx_var.get()
+        if ctx is not None and ctx.project is not None:
+            info = await run_in_threadpool(
+                job_runner.run_and_wait,
+                ctx.project,
+                "restore_backup",
+                {"target_dir": target, "source": file.filename or ""},
+                lambda _ctx: do_restore(tmp_bak, target),
+            )
+        else:
+            # 首次启动时可先恢复项目再打开；没有当前项目就不存在并发项目任务。
+            info = await run_in_threadpool(do_restore, tmp_bak, target)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         Path(tmp_bak).unlink(missing_ok=True)
-    # 恢复成功后在恢复的项目里留痕
-    def log_restored_project() -> None:
-        restored = AuditProject(info["path"])
-        try:
-            restored.log(operator, "恢复备份", info["path"])
-        finally:
-            restored.close()
-
-    await run_in_threadpool(log_restored_project)
+    ctx = _ctx_var.get()
+    assert ctx is not None
+    await run_in_threadpool(
+        _log_restored_project, info["path"], operator,
+        ctx.identity.account_id, ctx.identity.device_id, "恢复备份",
+    )
     return {"path": info["path"]}
+
+
+@app.post("/api/backup/restore-local")
+async def restore_local_backup(req: LocalBackupRestoreReq, operator: str = Depends(get_operator)):
+    """从本机路径恢复完整 .auditbak，避免 50GB 文件经浏览器上传的大小限制。"""
+    from export import restore_backup as do_restore
+
+    backup_path = req.backup_path.strip()
+    target = req.target_dir.strip()
+    if not backup_path or not target:
+        raise HTTPException(status_code=400, detail="备份文件路径和恢复目标目录均不能为空")
+    source = Path(backup_path).expanduser()
+    if source.suffix.lower() != ".auditbak":
+        raise HTTPException(status_code=400, detail="请选择 .auditbak 备份文件")
+    ctx = _ctx_var.get()
+    assert ctx is not None
+    try:
+        ctx = _ctx_var.get()
+        if ctx is not None and ctx.project is not None:
+            info = await run_in_threadpool(
+                job_runner.run_and_wait,
+                ctx.project,
+                "restore_local_backup",
+                {"target_dir": target, "source": str(source)},
+                lambda _ctx: do_restore(source, target),
+            )
+        else:
+            info = await run_in_threadpool(do_restore, source, target)
+        await run_in_threadpool(
+            _log_restored_project, info["path"], operator,
+            ctx.identity.account_id, ctx.identity.device_id, "恢复本地备份", str(source),
+        )
+        return {"path": info["path"]}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @app.get("/api/export/file/{filename}")
@@ -1237,11 +1933,7 @@ def _do_restart():
     """实际重启动作（Timer 线程执行，测试可 monkeypatch _schedule_restart 拦下）。"""
     # 关闭所有会话持有的项目连接，保证数据干净落盘
     for ctx in list(_sessions.values()):
-        if ctx.project is not None:
-            try:
-                ctx.project.close()
-            except Exception:
-                pass
+        _close_session_project(ctx)
     try:
         if getattr(sys, "frozen", False):
             # 打包版：sys.executable 就是程序本体，直接重启
@@ -1252,8 +1944,8 @@ def _do_restart():
             cmd = [sys.executable, str(script)]
             # 保持原进程工作目录重启（从任意目录启动都原样恢复）
             cwd = os.getcwd()
-        subprocess.Popen(cmd, cwd=cwd, start_new_session=True)
-    except Exception:
+        spawn_detached(cmd, cwd=cwd)
+    except PlatformError:
         pass
     finally:
         # 立即退出当前进程（不跑 atexit/finally 清理；flock 随 fd 关闭自动释放）
@@ -1273,11 +1965,7 @@ def quit_program(_: str = Depends(get_operator)):
 def _do_quit():
     """实际退出动作（Timer 线程执行，测试可 monkeypatch _schedule_restart 拦下）。"""
     for ctx in list(_sessions.values()):
-        if ctx.project is not None:
-            try:
-                ctx.project.close()
-            except Exception:
-                pass
+        _close_session_project(ctx)
     # 立即退出当前进程（不跑 atexit/finally 清理；flock 随 fd 关闭自动释放）
     os._exit(0)
 
@@ -1292,7 +1980,9 @@ def choose_folder(_: str = Depends(get_operator)):
     try:
         return {"path": platform_choose_folder()}
     except PlatformError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        # 选择器依赖系统图形会话；受限开发进程或自动化权限关闭时不能显示。
+        # 这不应抹掉用户已输入的路径，也不该以“请求失败”掩盖手输路径这一可行替代。
+        return {"path": "", "warning": f"{e}。未修改已输入路径，请直接粘贴项目文件夹完整路径。"}
 
 
 @app.post("/api/system/open-folder")
@@ -1309,6 +1999,21 @@ def open_folder(req: FolderReq, _: str = Depends(get_operator)):
 
 FRONTEND_DIR.mkdir(exist_ok=True)
 app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+
+
+@app.middleware("http")
+async def _no_cache_html(request: Request, call_next):
+    """SPA 入口不缓存（修复"初次进入空白，刷新后恢复"）。
+
+    前端每次构建会删除旧 hash 资源；若浏览器缓存了旧 index.html，
+    会引用已删除的旧 JS → 404 白屏。入口 HTML 每次重新验证（ETag 304），
+    hash 资源正常缓存。
+    """
+    response = await call_next(request)
+    path = request.url.path
+    if not path or path.endswith(("/", ".html")):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 def _install_crash_hook() -> Path:
@@ -1365,109 +2070,9 @@ def main():
         sys.stderr = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115 替换全局流，句柄须存活到进程退出
     _install_crash_hook()
     if "--serve" in sys.argv:
-        _serve()
+        serve_app(app, instance_lock_name=INSTANCE_LOCK_NAME, host=HOST, port=SETTINGS.port)
     else:
-        _launcher()
-
-
-def _launcher():
-    """启动器：探测已有实例 → 打开页面；否则拉起服务子进程并等就绪后打开页面。"""
-    import socket
-    import time as _time
-    from urllib.parse import urlparse
-
-    def _probe(url: str) -> bool:
-        try:
-            parsed = urlparse(url)
-            with socket.create_connection((parsed.hostname or "127.0.0.1", parsed.port or 80), timeout=0.5):
-                return True
-        except OSError:
-            return False
-
-    endpoint = discover_instance_endpoint()
-    if endpoint and _probe(endpoint):
-        print(f"审迹已在运行，正在打开页面：{endpoint}")
-        try:
-            open_browser(endpoint)
-        except PlatformError as e:
-            print(str(e))
-        return
-    # 未在运行：拉起服务子进程（detached，脱离本进程生命周期）
-    if getattr(sys, "frozen", False):
-        cmd = [sys.executable, "--serve"]
-    else:
-        script = Path(sys.argv[0]).resolve() if sys.argv else Path("main.py").resolve()
-        cmd = [sys.executable, str(script), "--serve"]
-    try:
-        subprocess.Popen(cmd, start_new_session=True)
-    except OSError as e:
-        print(f"无法启动服务：{e}")
-        return
-    url = None
-    for _ in range(40):
-        _time.sleep(0.25)
-        endpoint = discover_instance_endpoint()
-        if endpoint and _probe(endpoint):
-            url = endpoint
-            break
-    if url is None:
-        url = f"http://{HOST}:{SETTINGS.port}/"
-    print(f"审迹已启动：{url}")
-    try:
-        open_browser(url)
-    except PlatformError as e:
-        print(str(e))
-
-
-def _serve():
-    """服务常驻（--serve）：单实例锁 → 预留端口 → uvicorn 监听；浏览器由启动器负责打开。
-
-    端口由操作系统分配（或由开发环境显式指定），并把已监听 socket 交给
-    Uvicorn，避免固定 8000 端口及“检查后被占用”的竞态。
-    """
-    lock_name = "shenji.lock"
-    lock = acquire_single_instance(lock_name)
-    if lock is None:
-        # 已有服务实例（多次双击的竞态），本进程直接退出
-        print("已有服务实例，退出")
-        return
-    listener = None
-    try:
-        try:
-            listener, port = reserve_local_port(HOST, SETTINGS.port)
-        except PlatformError as e:
-            print(str(e))
-            return
-        print(f"审迹正在启动：http://{HOST}:{port}")
-        write_instance_endpoint(HOST, port, lock_name)
-        import uvicorn
-
-        if sys.platform == "win32":
-            # uvicorn fd 模式在 Windows 上访问 socket.AF_UNIX（该常量 Windows 不存在）
-            # → AttributeError 启动崩溃（CI Windows 实测）。改为 host+port 启动：
-            # 端口已由 reserve_local_port 确定，close 后重新 bind 的竞态窗口极小。
-            listener.close()
-            listener = None
-            uvicorn.run(app, host=HOST, port=port)
-        else:
-            uvicorn.run(app, fd=listener.fileno())
-    finally:
-        if listener is not None:
-            listener.close()
-        release_single_instance(lock)
-        try:
-            from platform_adapter import _endpoint_path
-            _endpoint_path(lock_name).unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
-def _auto_open_browser(port: int):
-    """延迟 1 秒自动开浏览器；失败不致命（打印提示，用户手动访问）。"""
-    try:
-        open_browser(f"http://{HOST}:{port}")
-    except PlatformError as e:
-        print(str(e))
+        launch_service(instance_lock_name=INSTANCE_LOCK_NAME, host=HOST, port=SETTINGS.port)
 
 
 if __name__ == "__main__":

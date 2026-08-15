@@ -26,3 +26,4 @@ scripts/__pycache__/
 # Vite 前端构建和依赖（源码、锁文件保留）
 frontend-v3/dist/
 frontend-v3/node_modules/
+.pnpm-store/

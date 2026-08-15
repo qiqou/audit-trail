@@ -1,0 +1,6 @@
+# 生产运行时直接依赖。由 `uv pip compile --universal --generate-hashes`
+# 生成 requirements.txt；发布、CI 和本地构建只安装锁定文件。
+fastapi>=0.110,<1
+uvicorn>=0.29,<1
+openpyxl>=3.1,<4
+python-multipart>=0.0.9,<1

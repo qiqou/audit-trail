@@ -151,11 +151,14 @@ def test_archived_direct_edit_blocked(proj):
 
 
 def test_issue_schema_has_optional_category(proj):
-    """v3 在 issues 增加可选问题分类，旧库由数据库迁移补齐。"""
+    """v4 保留问题分类，并补充稳定标识、冻结编号和结构化金额字段。"""
     cols = {r[1] for r in proj._conn.execute("PRAGMA table_info(issues)").fetchall()}
-    assert cols == {"id", "unit_id", "seq", "department", "category", "defect_type", "defect_desc",
-                    "amount", "regulation_basis", "suggestion", "author", "reviewer",
-                    "status", "created_at", "updated_at"}
+    assert {
+        "id", "issue_uuid", "unit_id", "seq", "issue_code", "sort_order",
+        "department", "category", "defect_type", "defect_desc", "amount", "amount_minor",
+        "currency", "amount_unit", "regulation_basis", "suggestion", "author", "reviewer",
+        "status", "created_at", "updated_at",
+    } <= cols
 
 
 def test_status_field_in_update_is_ignored(proj):

@@ -2,17 +2,11 @@
 #
 # 用法（推荐）：双击项目根目录 build-windows.bat
 # 或命令行：
-#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_windows.ps1 [-SkipTests]
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 #
 # 流程：环境检查 → 虚拟环境 → Python/前端依赖 → 前端构建 → 门禁 → PyInstaller → 清单 → ZIP → 冒烟
-# 要求：已安装 Python 3.11（https://www.python.org/downloads/，安装时勾选 Add python.exe to PATH）
-#
-# 参数：
-#   -SkipTests  跳过 ruff + pytest 门禁（紧急打包用，不推荐）
-
-param(
-    [switch]$SkipTests
-)
+# 固定构建环境：Python 3.11.11、Node.js 22.12.0、pnpm 11.5.0。
+# 构建不提供跳过测试选项；发布包必须通过 ruff + pytest 门禁。
 
 $ErrorActionPreference = 'Stop'
 # 子进程（python/pyinstaller）输出按 UTF-8 解码，防中文乱码
@@ -48,7 +42,13 @@ if (-not $py) {
 $pyVer = (& python -c "import sys; print('%d.%d' % sys.version_info[:2])").Trim()
 Write-Host "    检测到 Python: $pyVer ($($py.Source))"
 if ($pyVer -ne '3.11') {
-    Write-Host "    [提示] CI 使用 Python 3.11，当前 $pyVer 可能不兼容；建议安装 3.11 后重试（脚本继续尝试）。" -ForegroundColor Yellow
+    Write-Fail "需要 Python 3.11.11，当前为 $pyVer。请安装指定版本后重试。"
+    exit 1
+}
+$pyPatch = (& python -c "import sys; print('.'.join(map(str, sys.version_info[:3])))").Trim()
+if ($pyPatch -ne '3.11.11') {
+    Write-Fail "需要 Python 3.11.11，当前为 $pyPatch。为保证可复现构建，拒绝继续。"
+    exit 1
 }
 
 # [2/7] 虚拟环境
@@ -79,10 +79,15 @@ if (-not (Test-Path $pyVenv)) {
 } else {
     Write-Step "[2/7] 使用已有虚拟环境 .venv"
 }
+$venvPatch = (& $pyVenv -c "import sys; print('.'.join(map(str, sys.version_info[:3])))").Trim()
+if ($venvPatch -ne '3.11.11') {
+    Write-Fail "现有 .venv 使用 Python $venvPatch，不是锁定的 3.11.11。请删除 .venv 后重新运行本脚本。"
+    exit 1
+}
 
 # [3/7] 依赖
-Write-Step "[3/7] 安装依赖（requirements + pyinstaller + 门禁工具）"
-& $pyVenv -m pip install --disable-pip-version-check -r requirements.txt -r requirements-dev.txt pyinstaller
+Write-Step "[3/7] 安装锁定依赖（requirements-dev.txt）"
+& $pyVenv -m pip install --disable-pip-version-check --require-hashes -r requirements-dev.txt
 if ($LASTEXITCODE -ne 0) {
     Write-Fail "依赖安装失败。请检查网络/代理后重试（pip install 可重复执行，幂等）。"
     exit 1
@@ -97,7 +102,17 @@ Write-Ok "依赖就绪"
 Write-Step "[4/7] 构建 V3 前端（pnpm + TypeScript + Vite）"
 $pnpm = Get-Command pnpm -ErrorAction SilentlyContinue
 if (-not $pnpm) {
-    Write-Fail "未找到 pnpm。请先安装 Node.js 22+，再执行：corepack enable；corepack prepare pnpm@11.5.0 --activate"
+    Write-Fail "未找到 pnpm。请先安装 Node.js 22.12.0，再执行：corepack enable；corepack prepare pnpm@11.5.0 --activate"
+    exit 1
+}
+$nodeVersion = (& node --version).Trim().TrimStart('v')
+if ($nodeVersion -ne '22.12.0') {
+    Write-Fail "需要 Node.js 22.12.0，当前为 $nodeVersion。为保证可复现构建，拒绝继续。"
+    exit 1
+}
+$pnpmVersion = (& pnpm --version).Trim()
+if ($pnpmVersion -ne '11.5.0') {
+    Write-Fail "需要 pnpm 11.5.0，当前为 $pnpmVersion。请执行 corepack prepare pnpm@11.5.0 --activate 后重试。"
     exit 1
 }
 & pnpm --dir frontend-v3 install --frozen-lockfile
@@ -112,23 +127,18 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Ok "V3 前端构建完成"
 
-# [5/7] 门禁
-if ($SkipTests) {
-    Write-Host "    [跳过] 门禁检查（-SkipTests）" -ForegroundColor Yellow
-} else {
-    Write-Step "[5/7] 门禁检查（ruff + pytest）"
-    & $ruffExe check .
-    if ($LASTEXITCODE -ne 0) {
-        Write-Fail "ruff 静态检查未通过，请修复代码后重试；紧急打包可加参数 -SkipTests。"
-        exit 1
-    }
-    & $pytestExe tests/ -q --disable-warnings
-    if ($LASTEXITCODE -ne 0) {
-        Write-Fail "pytest 回归测试未通过，请修复后重试；紧急打包可加参数 -SkipTests。"
-        exit 1
-    }
-    Write-Ok "门禁全绿"
+Write-Step "[5/7] 门禁检查（ruff + pytest）"
+& $ruffExe check .
+if ($LASTEXITCODE -ne 0) {
+    Write-Fail "ruff 静态检查未通过，请修复代码后重试。"
+    exit 1
 }
+& $pytestExe tests/ -q --disable-warnings
+if ($LASTEXITCODE -ne 0) {
+    Write-Fail "pytest 回归测试未通过，请修复后重试。"
+    exit 1
+}
+Write-Ok "门禁全绿"
 
 # [6/7] 打包
 Write-Step "[6/7] PyInstaller 打包（约 1-3 分钟，请耐心等待）"
@@ -168,31 +178,38 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# 冒烟：启动 exe，按进程 PID 发现动态端口后请求首页。
+# 冒烟：启动器会拉起独立服务子进程后退出，故从当前改造版实例端点读取地址，
+# 不能再按启动器 PID 查监听端口。
 Write-Host "    启动 exe 冒烟测试（最长 60 秒）..."
 $p = Start-Process -FilePath $exePath -PassThru
 $ok = $false
 $smokeUrl = ""
+$servicePid = $null
+$endpointFile = Join-Path $env:USERPROFILE ".shenji\shenji-v11-upgrade.lock.endpoint.json"
 for ($i = 0; $i -lt 60; $i++) {
     Start-Sleep -Seconds 1
-    if ($p.HasExited) { break }
-    $ports = @(Get-NetTCPConnection -OwningProcess $p.Id -State Listen -ErrorAction SilentlyContinue |
-        Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1') } |
-        Select-Object -ExpandProperty LocalPort -Unique)
-    foreach ($port in $ports) {
-        $url = "http://127.0.0.1:$port/"
+    if (Test-Path $endpointFile) {
         try {
-            $r = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2
-            if ($r.StatusCode -eq 200) { $ok = $true; $smokeUrl = $url; break }
+            $endpoint = Get-Content $endpointFile -Raw | ConvertFrom-Json
+            if ($endpoint.host -and $endpoint.port) {
+                $url = "http://$($endpoint.host):$($endpoint.port)/"
+                $r = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2
+                if ($r.StatusCode -eq 200) {
+                    $ok = $true
+                    $smokeUrl = $url
+                    $servicePid = $endpoint.pid
+                    break
+                }
+            }
         } catch { }
     }
-    if ($ok) { break }
 }
+if ($servicePid) { Stop-Process -Id $servicePid -Force -ErrorAction SilentlyContinue }
 if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
 if ($ok) {
     Write-Ok "冒烟通过：$smokeUrl 返回 200"
 } else {
-    Write-Fail "冒烟失败：exe 启动后未发现可访问的动态本地端口（进程已退出：$($p.HasExited)）。"
+    Write-Fail "冒烟失败：未从 $endpointFile 发现可访问的改造版服务（启动器已退出：$($p.HasExited)）。"
     $logDir = Join-Path $env:USERPROFILE ".shenji\logs"
     if (Test-Path $logDir) {
         Write-Host "    最近崩溃日志：" -ForegroundColor Yellow

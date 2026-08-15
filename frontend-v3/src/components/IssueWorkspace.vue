@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { api, type Issue, type Unit } from "../api/client";
 import { formatIssueNo } from "../format";
 import EvidencePanel from "./EvidencePanel.vue";
+import ExchangeWorkbench from "./ExchangeWorkbench.vue";
 import IssueEditor from "./IssueEditor.vue";
 
 type AutoSaveMode = "realtime" | "5m" | "20m";
@@ -30,7 +31,7 @@ const issuesByUnit = ref<Record<string, Issue[]>>({});
 const current = ref<Issue | null>(null);
 const newlyCreatedIssueId = ref<number | null>(null);
 const loading = ref(false);
-const editor = ref<{ confirmLeave: () => Promise<boolean> } | null>(null);
+const editor = ref<{ confirmLeave: () => Promise<boolean>; hasUnsavedChanges: () => boolean } | null>(null);
 const departmentCreateVisible = ref(false);
 const departmentForCreate = ref("");
 const departmentUnitId = ref<number | null>(null);
@@ -42,6 +43,8 @@ const collapsedDepartments = ref<string[]>(readStoredArray<string>("audit_collap
 const leftWidth = ref(readStoredWidth("audit_col_left_v3", 300));
 const rightWidth = ref(readStoredWidth("audit_col_right_v3", 360));
 const viewportWidth = ref(window.innerWidth);
+const exchangeVisible = ref(false);
+const evidenceRefreshKey = ref(0);
 let stopResize: (() => void) | undefined;
 
 const unitRows = computed(() => props.units.map((unit) => ({
@@ -67,6 +70,9 @@ const departmentGroups = computed<DepartmentGroup[]>(() => {
 });
 const selectedUnit = computed(() => props.units.find((unit) => unit.id === selectedUnitId.value) ?? null);
 const totalIssueCount = computed(() => Object.values(issuesByUnit.value).flat().length);
+const exchangeIssueItems = computed(() => unitRows.value.flatMap(({ unit, issues }) => issues.map((issue) => ({
+  ...issue, unit_name: unit.name,
+}))));
 const listSummary = computed(() => treeView.value === "unit"
   ? `${props.units.length} 个单位 · ${totalIssueCount.value} 个底稿`
   : `${departmentGroups.value.length} 个版块 · ${totalIssueCount.value} 个底稿`);
@@ -321,6 +327,31 @@ async function updated(issue: Issue): Promise<void> {
   await loadTree();
 }
 
+async function openExchange(): Promise<void> {
+  const target = current.value ?? exchangeIssueItems.value[0];
+  if (!target) {
+    ElMessage.warning("项目中暂无可交流的底稿");
+    return;
+  }
+  if (current.value && editor.value && !(await editor.value.confirmLeave())) return;
+  try {
+    current.value = await api.issue(target.id);
+    selectedUnitId.value = current.value.unit_id;
+    exchangeVisible.value = true;
+  } catch (error) {
+    report(error);
+  }
+}
+
+async function exchangeApplied(issue: Issue): Promise<void> {
+  await updated(issue);
+}
+
+async function exchangeEvidenceChanged(): Promise<void> {
+  evidenceRefreshKey.value += 1;
+  await loadTree();
+}
+
 function discardedIssue(issueId: number): void {
   if (newlyCreatedIssueId.value === issueId) newlyCreatedIssueId.value = null;
   if (current.value?.id === issueId) current.value = null;
@@ -330,15 +361,15 @@ function discardedIssue(issueId: number): void {
 async function deleteIssue(issue: Issue): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `将删除问题 ${issue.seq}“${issue.defect_type || "未定性"}”及其版本记录；关联会解除，但附件实体会保留在资料库中。`,
-      "删除底稿",
-      { type: "warning", confirmButtonText: "删除底稿", cancelButtonText: "取消" },
+      `将把问题 ${issue.seq}“${issue.defect_type || "未定性"}”移入回收站；版本和附件关联将保留，可在项目菜单的回收站恢复。`,
+      "移入回收站",
+      { type: "warning", confirmButtonText: "移入回收站", cancelButtonText: "取消" },
     );
     await api.deleteIssue(issue.id);
     if (current.value?.id === issue.id) current.value = null;
     if (newlyCreatedIssueId.value === issue.id) newlyCreatedIssueId.value = null;
     await loadTree();
-    ElMessage.success("底稿已删除，附件仍保留在资料库");
+    ElMessage.success("底稿已移入回收站，可在项目菜单恢复");
   } catch (error) {
     if (error !== "cancel" && error !== "close") report(error);
   }
@@ -398,6 +429,10 @@ async function confirmCurrentLeave(): Promise<boolean> {
   return editor.value.confirmLeave();
 }
 
+function hasUnsavedChanges(): boolean {
+  return Boolean(current.value && editor.value?.hasUnsavedChanges());
+}
+
 async function selectIssueById(issueId: number): Promise<void> {
   try {
     const issue = await api.issue(issueId);
@@ -416,7 +451,7 @@ function selectUnit(unitId: number): void {
   current.value = null;
 }
 
-defineExpose({ confirmCurrentLeave, selectIssueById, selectUnit });
+defineExpose({ confirmCurrentLeave, hasUnsavedChanges, selectIssueById, selectUnit, openExchange });
 </script>
 
 <template>
@@ -440,7 +475,7 @@ defineExpose({ confirmCurrentLeave, selectIssueById, selectUnit });
     </aside>
 
     <IssueEditor v-if="current" ref="editor" :issue="current" :departments="departments" :categories="categories" :auto-save-mode="autoSaveMode" :is-new="newlyCreatedIssueId === current.id" :issue-number-rule="issueNumberRule" @updated="updated" @discarded="discardedIssue" @delete-requested="deleteIssue" />
-    <EvidencePanel v-if="current" :key="current.id" :issue="current" :units="units" @changed="loadTree" />
+    <EvidencePanel v-if="current" :key="`${current.id}-${evidenceRefreshKey}`" :issue="current" :units="units" @changed="loadTree" />
     <article v-if="!current" class="empty-editor panel"><el-empty :description="selectedUnit ? '选择或新建底稿后开始编制' : '请先选择被审计单位'" /></article>
     <div class="workspace-resizer left" :style="{ left: `${leftWidth}px` }" title="拖拽调整问题列表宽度" @mousedown.prevent="startResize('left', $event)" />
     <div class="workspace-resizer right" :style="{ right: `${rightWidth}px` }" title="拖拽调整附件列表宽度" @mousedown.prevent="startResize('right', $event)" />
@@ -464,5 +499,6 @@ defineExpose({ confirmCurrentLeave, selectIssueById, selectUnit });
       </div>
       <template #footer><el-button @click="copyVisible = false">取消</el-button><el-button type="primary" :disabled="!copyFields.length" @click="copyIssues">复制到剪贴板</el-button></template>
     </el-dialog>
+    <ExchangeWorkbench v-if="exchangeVisible && current" :issue="current" :issue-items="exchangeIssueItems" :issue-number-rule="issueNumberRule" @applied="exchangeApplied" @evidence-changed="exchangeEvidenceChanged" @close="exchangeVisible = false" />
   </section>
 </template>

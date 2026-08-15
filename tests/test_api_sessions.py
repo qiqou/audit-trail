@@ -6,6 +6,8 @@
 - 跨单位引用删除保护（F-01）在 API 层返回 400
 """
 
+import hashlib
+import sqlite3
 from pathlib import Path
 from urllib.parse import quote
 
@@ -30,6 +32,12 @@ def _login(client, name):
 
 def _headers(token):
     return {"X-Session": token}
+
+
+def test_local_api_rejects_untrusted_host(client):
+    """DNS rebinding 不能借任意 Host 访问本机审迹接口。"""
+    response = client.get("/api/session", headers={"Host": "evil.example"})
+    assert response.status_code == 400
 
 
 def test_f03_sessions_isolated_projects(client, tmp_path):
@@ -60,15 +68,151 @@ def test_f03_sessions_isolated_projects(client, tmp_path):
     assert units1.json()[0]["name"] == "华电集团XX电厂"
 
 
+def test_upload_hashes_while_streaming_without_second_tempfile_read(client, tmp_path, monkeypatch):
+    """普通附件上传在接收流中完成摘要，不能再回读整个临时文件。"""
+    token = _login(client, "张三")
+    headers = _headers(token)
+    assert client.post(
+        "/api/project/create", json={"path": str(tmp_path / "流式上传项目")}, headers=headers,
+    ).status_code == 200
+    assert client.post("/api/units", json={"name": "单位A"}, headers=headers).status_code == 200
+    monkeypatch.setattr(main, "_sha256_of", lambda _path: (_ for _ in ()).throw(AssertionError("不应二次读取临时文件")))
+
+    payload = b"streamed-attachment"
+    response = client.post(
+        "/api/units/1/files", files={"file": ("证据.pdf", payload, "application/pdf")}, headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["sha256"] == hashlib.sha256(payload).hexdigest()
+
+
+def test_same_project_second_session_takes_over_and_old_session_gets_preempted(client, tmp_path):
+    """同一项目强制切换（接管语义）：第二个会话打开成功，旧会话心跳感知被接管。"""
+    t1 = _login(client, "张三")
+    t2 = _login(client, "李四")
+    path = tmp_path / "单标签项目"
+    created = client.post("/api/project/create", json={"path": str(path)}, headers=_headers(t1))
+    assert created.status_code == 200
+
+    # t2 打开同一项目：不再 409 拒绝，而是强制接管
+    opened = client.post("/api/project/open", json={"path": created.json()["path"]}, headers=_headers(t2))
+    assert opened.status_code == 200
+
+    # t1 心跳感知被接管（一次性 project_preempted）
+    heartbeat = client.get("/api/session", headers=_headers(t1))
+    assert heartbeat.status_code == 200
+    assert heartbeat.json().get("project_preempted") is True
+    # 再次心跳不再重复提示
+    heartbeat2 = client.get("/api/session", headers=_headers(t1))
+    assert heartbeat2.json().get("project_preempted") is None
+
+    # t1 的项目连接已被吊销：项目级请求得到明确错误
+    denied = client.get("/api/units", headers=_headers(t1))
+    assert denied.status_code == 400
+    assert "请先打开" in denied.json()["detail"]
+
+    # t2 持有租约可正常使用
+    assert client.get("/api/units", headers=_headers(t2)).status_code == 200
+
+    # t1 退出后不影响 t2
+    assert client.delete("/api/session", headers=_headers(t1)).status_code == 200
+    assert client.get("/api/units", headers=_headers(t2)).status_code == 200
+
+
+def test_expired_session_releases_project_lease_and_connection(client, tmp_path, monkeypatch):
+    """浏览器未显式退出时，超时会话也必须释放项目锁，不能无限累积连接。"""
+    monkeypatch.setattr(main, "SESSION_TTL_SECONDS", 3600)
+    first = _login(client, "张三")
+    project_path = tmp_path / "过期会话项目"
+    created = client.post("/api/project/create", json={"path": str(project_path)}, headers=_headers(first))
+    assert created.status_code == 200
+    project = main._sessions[first].project
+    assert project is not None
+    main._sessions[first].last_seen -= 3601
+
+    second = _login(client, "李四")  # 登录时回收过期会话
+    assert first not in main._sessions
+    with pytest.raises(sqlite3.ProgrammingError):
+        project.list_units()
+    reopened = client.post("/api/project/open", json={"path": created.json()["path"]}, headers=_headers(second))
+    assert reopened.status_code == 200
+
+
+def test_open_project_permission_error_is_actionable_and_keeps_current_project(client, tmp_path, monkeypatch):
+    """最近项目无法访问时必须返回 400，且不能关闭当前已打开的项目。"""
+    token = _login(client, "张三")
+    headers = _headers(token)
+    current_path = tmp_path / "当前项目"
+    assert client.post("/api/project/create", json={"path": str(current_path)}, headers=headers).status_code == 200
+    previous = main._sessions[token].project
+
+    monkeypatch.setattr(main, "AuditProject", lambda _path: (_ for _ in ()).throw(sqlite3.OperationalError("unable to open database file")))
+    response = client.post("/api/project/open", json={"path": str(current_path) + ".auditproj"}, headers=headers)
+
+    assert response.status_code == 400
+    assert "读取和写入权限" in response.json()["detail"]
+    assert main._sessions[token].project is previous
+
+
+def test_choose_folder_failure_returns_warning_without_http_error(client, monkeypatch):
+    """系统选择器不可用时，前端可保留手输路径并展示替代操作提示。"""
+    from platform_adapter import PlatformError
+
+    token = _login(client, "张三")
+    monkeypatch.setattr(main, "platform_choose_folder", lambda: (_ for _ in ()).throw(PlatformError("无法弹出文件夹选择器")))
+    response = client.post("/api/system/choose-folder", headers=_headers(token))
+
+    assert response.status_code == 200
+    assert response.json()["path"] == ""
+    assert "直接粘贴" in response.json()["warning"]
+
+
 def test_session_validation_and_empty_project_path(client):
     """前端可校验服务重启后的会话；空路径不能误打开源码工作目录。"""
     token = _login(client, "张三")
     headers = _headers(token)
     current = client.get("/api/session", headers=headers)
     assert current.status_code == 200
-    assert current.json() == {"operator": "张三"}
+    session = current.json()
+    assert session["operator"] == "张三"
+    assert session["account_id"] == main._sessions[token].identity.account_id
+    assert session["device_id"] == main._sessions[token].identity.device_id
     assert client.post("/api/project/open", json={"path": "  "}, headers=headers).status_code == 400
     assert client.post("/api/project/create", json={"path": "", "name": "错误项目"}, headers=headers).status_code == 400
+
+
+def test_login_requires_entered_name_and_also_records_os_account(client, monkeypatch):
+    """姓名是主留痕；OS 账户作为不可由前端伪造的第二道来源信息。"""
+    from platform_adapter import OSIdentity
+
+    identity = OSIdentity("系统账户", "uid-501", "device-001")
+    monkeypatch.setattr(main, "current_os_identity", lambda: identity)
+    response = client.post("/api/session", json={"operator": "现场编制人"})
+
+    assert response.status_code == 200
+    assert response.json()["operator"] == "现场编制人"
+    assert main._sessions[response.json()["token"]].identity == identity
+
+    assert client.post("/api/session", json={"operator": "   "}).status_code == 400
+
+
+def test_project_log_keeps_entered_name_and_os_account_metadata(client, tmp_path, monkeypatch):
+    """审计主留痕可读，OS UID/SID 只作为对应日志的核验元数据。"""
+    from platform_adapter import OSIdentity
+
+    identity = OSIdentity("系统账户", "uid-501", "device-001")
+    monkeypatch.setattr(main, "current_os_identity", lambda: identity)
+    token = _login(client, "现场编制人")
+    created = client.post(
+        "/api/project/create", json={"path": str(tmp_path / "项目A"), "name": "项目A"},
+        headers=_headers(token),
+    )
+    assert created.status_code == 200
+    log = client.get("/api/logs", headers=_headers(token)).json()[0]
+    assert log["operator"] == "现场编制人"
+    assert log["actor_account"] == "现场编制人"
+    assert log["actor_uid"] == "uid-501"
+    assert log["device_id"] == "device-001"
 
 
 def test_logout_releases_session_and_project(client, tmp_path):
@@ -284,7 +428,7 @@ def test_open_file_endpoint_opens_attachment_with_default_program(client, tmp_pa
 
 
 def test_recent_projects_api(client, tmp_path):
-    """最近项目：打开/创建自动记录、重命名更新、按使用人隔离、可移除。"""
+    """最近项目：打开/创建自动记录、重命名更新、按输入的使用人隔离、可移除。"""
     token = _login(client, "张三")
     headers = _headers(token)
 
@@ -309,7 +453,7 @@ def test_recent_projects_api(client, tmp_path):
     items = client.get("/api/recent", headers=headers).json()["items"]
     assert items[0]["name"] == "项目B改"
 
-    # 其他使用人看不到（按使用人隔离）
+    # 不同使用人不共享最近项目；OS 账户仅保存在项目日志备查。
     token2 = _login(client, "李四")
     assert client.get("/api/recent", headers=_headers(token2)).json()["items"] == []
 
@@ -366,6 +510,24 @@ def test_folder_upload_dedup_reuses_existing(client, tmp_path):
         headers=headers,
     )
     assert "duplicated" not in r4.json()
+
+
+def test_folder_upload_reuses_streaming_member_digests(client, tmp_path, monkeypatch):
+    """文件夹上传在接收流中完成成员摘要，不得为判重再次完整读取临时文件。"""
+    token = _login(client, "张三")
+    headers = _headers(token)
+    client.post("/api/project/create", json={"path": str(tmp_path / "项目A"), "name": "项目A"}, headers=headers)
+    unit_id = client.post("/api/units", json={"name": "单位A"}, headers=headers).json()["id"]
+    monkeypatch.setattr(main, "_sha256_of", lambda _path: (_ for _ in ()).throw(AssertionError("不应重读文件夹临时文件")))
+
+    response = client.post(
+        f"/api/units/{unit_id}/folder-upload",
+        data={"folder_name": "合同资料"},
+        files=[("files", ("子目录/证据.txt", b"folder-stream", "text/plain"))],
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["mime"] == "folder"
 
 
 def test_global_search_finds_units_issues_files(client, tmp_path):

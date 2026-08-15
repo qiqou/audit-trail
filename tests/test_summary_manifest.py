@@ -151,6 +151,86 @@ def test_package_keeps_same_name_evidence_and_returns_real_collision_name(proj, 
         assert {archive.read(name) for name in names} == {b"first", b"second"}
 
 
+def test_package_streams_directly_to_zip_without_staging_copies(proj, tmp_path, monkeypatch):
+    """归档不应再复制整套附件或生成 staging 目录；ZIP 内容与清单仍保持可核对。"""
+    import export
+
+    unit_id = proj.add_unit("单位A", "张三")
+    issue_id = proj.add_issue(unit_id, "张三", defect_type="问题A")
+    ordinary = tmp_path / "普通证据.txt"
+    ordinary.write_bytes(b"ordinary")
+    evidence = proj.add_file(unit_id, ordinary, "张三")
+    proj.link_file(issue_id, evidence["id"], "张三")
+
+    folder_source = tmp_path / "证据文件夹"
+    folder_source.mkdir()
+    (folder_source / "成员.txt").write_bytes(b"folder member")
+    folder = proj.add_folder(unit_id, [("成员.txt", folder_source / "成员.txt")], "证据文件夹", "张三")
+    proj.link_file(issue_id, folder["id"], "张三")
+
+    monkeypatch.setattr(export.shutil, "copy2", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("归档不应 staging 复制")))
+    monkeypatch.setattr(export.shutil, "copytree", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("归档不应 staging 复制")))
+    monkeypatch.setattr(export.tempfile, "TemporaryDirectory", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("归档不应创建 staging 目录")))
+
+    result = package_project(proj)
+    assert not list((proj.root / "输出").glob("问题汇总_*.xlsx"))
+    with zipfile.ZipFile(result["abs_path"]) as archive:
+        names = archive.namelist()
+        assert any(name.endswith("普通证据.txt") for name in names)
+        assert any(name.endswith("证据文件夹/成员.txt") for name in names)
+        assert archive.testzip() is None
+
+
+def test_package_failure_cleans_partial_zip(proj, tmp_path, monkeypatch):
+    """直接写 ZIP 失败时不应把未完成归档暴露到输出目录。"""
+    import export
+
+    unit_id = proj.add_unit("单位A", "张三")
+    issue_id = proj.add_issue(unit_id, "张三", defect_type="问题A")
+    source = tmp_path / "证据.txt"
+    source.write_bytes(b"evidence")
+    evidence = proj.add_file(unit_id, source, "张三")
+    proj.link_file(issue_id, evidence["id"], "张三")
+    monkeypatch.setattr(export, "_now_ts", lambda: "20260813_120000_000")
+    monkeypatch.setattr(export, "_write_streamed_archive_file", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("模拟磁盘写入失败")))
+
+    with pytest.raises(OSError, match="模拟磁盘写入失败"):
+        package_project(proj)
+    output_dir = proj.root / "输出"
+    assert not list(output_dir.glob("归档_*.zip"))
+    assert not list(output_dir.glob(".归档_*.tmp"))
+
+
+def test_package_rejects_attachment_removed_after_preflight_window(proj, tmp_path):
+    """即使预检后附件被外部删除，执行期也必须失败，不得静默生成少证据归档。"""
+    unit_id = proj.add_unit("单位A", "张三")
+    issue_id = proj.add_issue(unit_id, "张三", defect_type="问题A")
+    source = tmp_path / "证据.txt"
+    source.write_bytes(b"evidence")
+    evidence = proj.add_file(unit_id, source, "张三")
+    proj.link_file(issue_id, evidence["id"], "张三")
+    (proj.root / evidence["rel_path"]).unlink()
+
+    with pytest.raises(FileNotFoundError, match="附件已缺失"):
+        package_project(proj)
+    assert not list((proj.root / "输出").glob("归档_*.zip"))
+
+
+def test_package_rejects_attachment_changed_after_preflight_window(proj, tmp_path):
+    """归档执行期重算的摘要必须与预检时登记摘要一致，不能打入被替换证据。"""
+    unit_id = proj.add_unit("单位A", "张三")
+    issue_id = proj.add_issue(unit_id, "张三", defect_type="问题A")
+    source = tmp_path / "证据.txt"
+    source.write_bytes(b"original")
+    evidence = proj.add_file(unit_id, source, "张三")
+    proj.link_file(issue_id, evidence["id"], "张三")
+    (proj.root / evidence["rel_path"]).write_bytes(b"replaced")
+
+    with pytest.raises(ValueError, match="附件内容已变化"):
+        package_project(proj)
+    assert not list((proj.root / "输出").glob("归档_*.zip"))
+
+
 def test_selected_package_empty_never_falls_back_to_all_units(proj):
     """勾选范围为空是输入错误，不能静默打包全项目。"""
     proj.add_unit("单位A", "张三")

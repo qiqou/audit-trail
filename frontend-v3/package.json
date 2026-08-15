@@ -1,12 +1,16 @@
 {
   "name": "shenji-frontend",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "type": "module",
   "packageManager": "pnpm@11.5.0",
+  "engines": {
+    "node": "22.12.x"
+  },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "vue-tsc --noEmit && vite build",
+    "check:ui-contract": "node ../scripts/check_frontend_ui_contract.mjs",
+    "build": "pnpm run check:ui-contract && vue-tsc --noEmit && vite build",
     "typecheck": "vue-tsc --noEmit",
     "test:e2e": "playwright test"
   },

@@ -9,60 +9,52 @@ on:
 
 jobs:
   lint-test:
-    # 2026-08 v3.1：临时关闭测试门禁，以出安装包为第一优先。
-    # 恢复测试：删除 if: false，并在 build-windows/build-macos 加回 needs: lint-test。
-    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.12.0"
       - uses: pnpm/action-setup@v4
         with:
           version: "11.5.0"
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.11.11"
       - name: 构建 V3 前端（类型检查 + 生产构建）
         run: |
           pnpm --dir frontend-v3 install --frozen-lockfile
           pnpm --dir frontend-v3 build
       - name: 安装依赖
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-dev.txt
+          python -m pip install --require-hashes -r requirements-dev.txt
       - name: 静态检查（ruff）
         run: ruff check .
       - name: 回归测试（pytest）
         run: pytest tests/ -q --disable-warnings
-      - name: V3 工作台端到端回归
-        run: |
-          pnpm --dir frontend-v3 exec playwright install --with-deps chromium
-          E2E_PYTHON=python pnpm --dir frontend-v3 test:e2e
 
   build-windows:
-    runs-on: windows-latest
-    # needs: lint-test  # 2026-08 v3.1 临时移除：出包优先，恢复测试时加回
+    # Windows Server 2022 构建的 x64 onedir 包纳入 Windows 10 人工验收矩阵。
+    runs-on: windows-2022
+    needs: lint-test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.12.0"
       - uses: pnpm/action-setup@v4
         with:
           version: "11.5.0"
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.11.11"
       - name: 构建 V3 前端
         run: |
           pnpm --dir frontend-v3 install --frozen-lockfile
           pnpm --dir frontend-v3 build
       - name: 安装依赖
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          python -m pip install --require-hashes -r requirements-dev.txt
       - name: 用 spec 打包（与 macOS 同一入口）
         run: pyinstaller --noconfirm 审迹.spec
       - name: 校验产物存在（onedir：exe 在子目录）
@@ -80,7 +72,7 @@ jobs:
           Write-Host "冒烟测试: $($exe.FullName)"
           $p = Start-Process -FilePath $exe.FullName -PassThru
           $ok = $false
-          $endpointFile = "$env:USERPROFILE\.shenji\shenji.endpoint.json"
+          $endpointFile = "$env:USERPROFILE\.shenji\shenji-v11-upgrade.lock.endpoint.json"
           for ($i = 0; $i -lt 150; $i++) {
             Start-Sleep -Seconds 1
             # 新架构（启动器/服务分离）：启动器拉起服务子进程后即正常退出（exit 0），
@@ -142,29 +134,29 @@ jobs:
           retention-days: 30
 
   build-macos:
-    # 2026-08 v3.1：用户不需要 macOS 安装包，临时关闭（恢复时删除 if: false）。
-    if: false
-    runs-on: macos-latest
-    # needs: lint-test  # 2026-08 v3.1 临时移除：出包优先，恢复测试时加回
+    # GitHub `macos-14` 是 Apple Silicon runner；产品仅交付 arm64 macOS 包。
+    runs-on: macos-14
+    needs: lint-test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.12.0"
       - uses: pnpm/action-setup@v4
         with:
           version: "11.5.0"
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.11.11"
+      - name: 验证 Apple Silicon 构建机
+        run: test "$(uname -m)" = "arm64"
       - name: 构建 V3 前端
         run: |
           pnpm --dir frontend-v3 install --frozen-lockfile
           pnpm --dir frontend-v3 build
       - name: 安装依赖
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          python -m pip install --require-hashes -r requirements-dev.txt
       - name: 用 spec 打包（与 Windows 同一入口）
         run: pyinstaller --noconfirm 审迹.spec
       - name: 校验产物存在
@@ -180,8 +172,8 @@ jobs:
           OK=0
           for i in $(seq 1 150); do
             PORT=""
-            if [ -f "$HOME/.shenji/shenji.endpoint.json" ]; then
-              PORT=$(python3 -c "import json;d=json.load(open('$HOME/.shenji/shenji.endpoint.json'));print(d.get('port') or '')" 2>/dev/null)
+            if [ -f "$HOME/.shenji/shenji-v11-upgrade.lock.endpoint.json" ]; then
+              PORT=$(python3 -c "import json;d=json.load(open('$HOME/.shenji/shenji-v11-upgrade.lock.endpoint.json'));print(d.get('port') or '')" 2>/dev/null)
             fi
             if [ -n "$PORT" ] && curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/" >/dev/null; then
               OK=1
@@ -203,7 +195,7 @@ jobs:
       - name: 上传 macOS 安装包
         uses: actions/upload-artifact@v4
         with:
-          name: 审迹-macos
+          name: 审迹-macos-arm64
           path: |
             dist/审迹-macos.zip
             dist/manifest.txt

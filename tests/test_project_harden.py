@@ -53,6 +53,9 @@ def test_create_project_appends_ext_and_hides(client, tmp_path):
     assert created.is_dir()
     # 主防线：隐藏属性已设置（macOS/Windows 断言各自平台标志）
     assert _is_hidden(created), f"项目目录应已隐藏：{created}"
+    if sys.platform != "win32":
+        assert created.stat().st_mode & 0o777 == 0o700
+        assert (created / "audit.db").stat().st_mode & 0o777 == 0o600
     # 隐藏不影响程序读写：直接建一个单位验证会话内项目引用完好
     r2 = client.post("/api/units", json={"name": "华电集团XX电厂"}, headers=_h(t))
     assert r2.status_code == 200
@@ -143,6 +146,7 @@ def test_open_project_accepts_extended_dir(client, tmp_path):
     assert r.status_code == 200
     created = Path(r.json()["path"])
     # 关闭会话后重新打开（新会话，路径用伪装后的目录）
+    assert client.delete("/api/session", headers=_h(t)).status_code == 200
     t2 = _login(client, "复核员")
     r2 = client.post("/api/project/open", json={"path": str(created)}, headers=_h(t2))
     assert r2.status_code == 200
@@ -156,6 +160,7 @@ def test_open_project_auto_appends_ext(client, tmp_path):
     r = client.post("/api/project/create", json={"path": str(raw), "name": "手输路径项目"}, headers=_h(t))
     assert r.status_code == 200
     created = Path(r.json()["path"])
+    assert client.delete("/api/session", headers=_h(t)).status_code == 200
     t2 = _login(client, "复核员")
     # 不带后缀打开 → 自动补 .auditproj
     r2 = client.post("/api/project/open", json={"path": str(tmp_path / "手输路径项目")}, headers=_h(t2))

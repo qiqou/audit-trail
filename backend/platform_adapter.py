@@ -12,11 +12,16 @@
 - open_browser(url)                     默认浏览器打开
 - port_in_use(host, port) -> bool       端口占用检测
 - reserve_local_port(host, port)        预留动态本地端口，消除“探测后被抢占”窗口
+- spawn_detached(cmd, cwd)              脱离当前进程启动子进程（启动器/重启共用）
+- is_windows()                          平台能力判断，业务层不直接读取 sys.platform
 - acquire_single_instance(name) -> lock 单实例锁（成功返回锁对象，失败返回 None）
 - release_single_instance(lock)         释放单实例锁
 - harden_project(path) -> bool          隐藏项目目录（防误删改；失败返回 False）
 """
 
+import csv
+import getpass
+import io
 import json
 import os
 import socket
@@ -24,6 +29,8 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 # 程序配置目录（与数据库无关的运行时状态，如单实例锁）
@@ -31,11 +38,81 @@ CONFIG_DIR = Path.home() / ".shenji"
 LOCK_FILE = "shenji.lock"
 ENDPOINT_FILE = "shenji.endpoint.json"
 RECENT_FILE = "recent_projects.json"
+DEVICE_FILE = "device.json"
 _RECENT_LOCK = threading.Lock()
+_DEVICE_LOCK = threading.Lock()
+_EPHEMERAL_DEVICE_ID = str(uuid.uuid4())
 
 
 class PlatformError(Exception):
     """平台操作失败；message 是面向用户的可执行提示。"""
+
+
+@dataclass(frozen=True)
+class OSIdentity:
+    """当前启动程序的操作系统账户及本安装实例标识。
+
+    ``device_id`` 是本机本程序安装生成的随机 UUID，不采集硬件指纹；它只用于
+    在离线项目日志中区分同一 OS 账户的不同安装实例。
+    """
+
+    account_name: str
+    account_id: str
+    device_id: str
+
+
+def _device_id() -> str:
+    """获取或创建稳定安装标识；配置目录不可写时降级为进程内标识。
+
+    本机配置目录写入失败不应阻断离线审计工作；降级时日志仍可区分本次运行，
+    只是服务重启后安装标识会变化。调用方无需处理权限异常。
+    """
+    with _DEVICE_LOCK:
+        target = CONFIG_DIR / DEVICE_FILE
+        try:
+            value = str(json.loads(target.read_text(encoding="utf-8")).get("device_id", ""))
+            uuid.UUID(value)
+            return value
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            value = str(uuid.uuid4())
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            temp = target.with_suffix(target.suffix + f".{os.getpid()}.tmp")
+            temp.write_text(json.dumps({"device_id": value}), encoding="utf-8")
+            os.replace(temp, target)
+            return value
+        except OSError:
+            return _EPHEMERAL_DEVICE_ID
+
+
+def current_os_identity() -> OSIdentity:
+    """返回实际运行审迹的 OS 账户，禁止由前端姓名字段伪造。
+
+    macOS 使用 UID；Windows 优先使用当前账户 SID（读取失败才降级为
+    ``DOMAIN\\USERNAME``）。
+    这不是登录认证机制：审迹是离线单人工具，目的仅是让操作日志绑定系统账户。
+    """
+    try:
+        account_name = getpass.getuser().strip()
+    except (OSError, KeyError):
+        account_name = ""
+    account_name = account_name or os.environ.get("USERNAME") or os.environ.get("USER") or "未知账户"
+    if _is_windows():
+        domain = (os.environ.get("USERDOMAIN") or "").strip()
+        fallback = f"{domain}\\{account_name}" if domain else account_name
+        try:
+            result = subprocess.run(
+                ["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True,
+                text=True, timeout=3, check=False,
+            )
+            row = next(csv.reader(io.StringIO(result.stdout)), [])
+            candidate = row[-1].strip() if result.returncode == 0 and row else ""
+            account_id = candidate if candidate.upper().startswith("S-") else fallback
+        except (OSError, subprocess.SubprocessError):
+            account_id = fallback
+    else:
+        account_id = str(os.getuid()) if hasattr(os, "getuid") else account_name
+    return OSIdentity(account_name=account_name, account_id=account_id, device_id=_device_id())
 
 
 def _is_darwin() -> bool:
@@ -44,6 +121,36 @@ def _is_darwin() -> bool:
 
 def _is_windows() -> bool:
     return sys.platform == "win32"
+
+
+def is_windows() -> bool:
+    """是否为Windows。供业务层选择平台能力，避免散落读取 ``sys.platform``。"""
+    return _is_windows()
+
+
+def spawn_detached(command: list[str], cwd: str | os.PathLike[str] | None = None) -> None:
+    """以平台正确的方式启动脱离当前生命周期的子进程。
+
+    启动器拉起服务、服务自重启都必须使用同一策略：macOS 保留新会话；
+    Windows 使用独立进程组和脱离标志，避免父进程退出时误带走服务进程。
+    """
+    if not command:
+        raise PlatformError("启动命令为空，请重新启动程序")
+    kwargs: dict = {"cwd": str(cwd) if cwd is not None else None}
+    if _is_windows():
+        # 常量仅在Windows解释器暴露；数值来自Win32 CreateProcess 标志，
+        # 用 getattr 也让非Windows的单元测试可以验证分支。
+        new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        detached = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        kwargs["creationflags"] = (
+            new_group | detached
+        )
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen(command, **kwargs)
+    except OSError as e:
+        raise PlatformError(f"无法启动本地服务：{e}。请完全退出审迹后重试") from e
 
 
 def choose_folder(prompt: str = "请选择审计项目文件夹") -> str:
@@ -108,7 +215,7 @@ def open_browser(url: str) -> None:
             return
         if not webbrowser.open(url, new=0, autoraise=True):
             raise OSError("系统未接受浏览器打开请求")
-    except Exception as e:
+    except OSError as e:
         raise PlatformError(f"自动打开浏览器失败：{e}。请手动访问 {url}") from e
 
 
@@ -296,16 +403,21 @@ def release_single_instance(lock) -> None:
 
 
 def harden_project(path) -> bool:
-    """隐藏项目目录，默认资源管理器/Finder 不可见（防人员误删改）。
+    """收紧项目目录访问并隐藏目录，降低误删和跨账户误读风险。
 
-    macOS 用 chflags hidden；Windows 用 attrib +h。隐藏属性不影响程序按路径
-    读写，只影响文件管理器的默认显示。目录不存在或命令失败返回 False
-    （隐藏是增强措施，失败不阻断项目创建）。
+    POSIX 系统将项目目录设为 0700、已存在的数据库和清单设为 0600；macOS
+    另用 chflags hidden，Windows 仍用 attrib +h。隐藏属性本身不等于加密或访问
+    控制，目录权限也不替代 FileVault/BitLocker 等受控设备措施。失败不阻断创建。
     """
     target = Path(path).expanduser()
     if not target.is_dir():
         return False
     try:
+        if not _is_windows():
+            target.chmod(0o700)
+            for protected in (target / "audit.db", target / "manifest.json"):
+                if protected.is_file():
+                    protected.chmod(0o600)
         if _is_darwin():
             r = subprocess.run(
                 ["chflags", "hidden", str(target)],
@@ -318,6 +430,6 @@ def harden_project(path) -> bool:
                 capture_output=True, text=True, timeout=30, check=False,
             )
             return r.returncode == 0
-        return False
+        return not _is_windows()
     except (subprocess.TimeoutExpired, OSError):
         return False

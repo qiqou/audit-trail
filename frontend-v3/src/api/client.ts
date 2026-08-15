@@ -21,6 +21,7 @@ export interface HealthResult {
   ok: boolean;
   checked_at: string;
   counts: Record<string, number>;
+  sample: { checked: number; total: number };
   problems: Array<{ type: string; severity: string; message: string }>;
 }
 
@@ -33,6 +34,9 @@ export interface SummaryIssue {
   defect_type: string;
   category: string;
   amount: string;
+  amount_minor: number | null;
+  currency: string;
+  amount_unit: string;
   status: string;
   author: string;
   reviewer: string;
@@ -85,6 +89,9 @@ export interface Issue {
   defect_type: string;
   defect_desc: string;
   amount: string;
+  amount_minor: number | null;
+  currency: string;
+  amount_unit: string;
   regulation_basis: string;
   suggestion: string;
   author: string;
@@ -93,6 +100,71 @@ export interface Issue {
   created_at: string;
   updated_at: string;
   file_count?: number;
+}
+
+export type ExchangeRevisionStatus = "proposed" | "accepted" | "rejected" | "withdrawn";
+export type ExchangeRequestStatus = "open" | "provided" | "verified" | "withdrawn";
+
+export interface ExchangeRevision {
+  revision_uuid: string;
+  session_uuid: string;
+  version_id: number | null;
+  field_name: string;
+  old_value: string;
+  new_value: string;
+  reason: string;
+  status: ExchangeRevisionStatus;
+  proposed_by: string;
+  proposed_at: string;
+  decided_by: string;
+  decided_at: string | null;
+  applied_by: string;
+  applied_at: string | null;
+}
+
+export interface ExchangeComment {
+  comment_uuid: string;
+  session_uuid: string;
+  revision_uuid: string | null;
+  anchor_field: string;
+  body: string;
+  created_by: string;
+  created_at: string;
+}
+
+export interface ExchangeRequest {
+  request_uuid: string;
+  session_uuid: string;
+  content: string;
+  status: ExchangeRequestStatus;
+  provided_file_id: number | null;
+  provided_file_name: string | null;
+  note: string;
+  created_by: string;
+  created_at: string;
+  updated_by: string;
+  updated_at: string | null;
+}
+
+export interface ExchangeSession {
+  session_uuid: string;
+  issue_id: number | null;
+  issue_uuid: string;
+  base_version_id: number | null;
+  base_snapshot: Record<string, string | number | null>;
+  status: "open" | "closed";
+  opened_by: string;
+  opened_at: string;
+  closed_by: string;
+  closed_at: string | null;
+  close_note: string;
+  issue: Issue | null;
+  files: EvidenceFile[];
+  revisions: ExchangeRevision[];
+  comments: ExchangeComment[];
+  requests: ExchangeRequest[];
+  /** 仅交流轮次固化生成的版本（普通编辑保存的版本不在此列） */
+  round_versions: IssueVersion[];
 }
 
 export interface EvidenceFile {
@@ -148,9 +220,93 @@ export interface PackageResult {
   download_url: string;
 }
 
+export interface ArchivePreflight {
+  ok: boolean;
+  blockers: Array<{ code: string; message: string }>;
+  warnings: Array<{ code: string; message: string }>;
+  counts: { units: number; issues: number; files: number; non_archived: number };
+  health: { checked: { checked: number; total: number }; problems: number };
+  confirmation_token: string;
+}
+
 export interface BackupResult {
   filename: string;
   download_url: string;
+}
+
+export interface BackupSettings {
+  enabled: boolean;
+  target_dir: string;
+  interval_minutes: number;
+  retention_days: number;
+  max_bytes: number;
+  last_success_at: string;
+  last_error: string;
+}
+
+export interface AmountSettings {
+  currency: string;
+  amount_unit: string;
+  allowed_units: string[];
+}
+
+export interface RecoveryPoint {
+  id: string;
+  created_at: string;
+  attachments: number;
+  size: number;
+  logical_bytes: number;
+  health: string;
+}
+
+export interface RecycledIssue {
+  recycle_id: number;
+  deleted_at: string;
+  deleted_by: string;
+  id: number;
+  issue_uuid: string;
+  unit_id: number;
+  unit_name: string;
+  seq: number;
+  department: string;
+  defect_type: string;
+  status: string;
+}
+
+export interface RecycledIssuePreview {
+  recycle_id: number;
+  deleted_at: string;
+  deleted_by: string;
+  unit_name: string;
+  issue: Issue & { issue_uuid?: string; deleted_at?: string; deleted_by?: string };
+  version_count: number;
+  attachment_total: number;
+  attachments: Array<{ id: number; orig_name: string; mime: string; size: number; sha256: string }>;
+  attachments_truncated: boolean;
+}
+
+export interface RecycledUnit {
+  recycle_id: number;
+  deleted_at: string;
+  deleted_by: string;
+  id: number;
+  unit_uuid: string;
+  name: string;
+  issue_count: number;
+  file_count: number;
+}
+
+export interface RecycledFile {
+  recycle_id: number;
+  deleted_at: string;
+  deleted_by: string;
+  id: number;
+  file_uuid: string;
+  unit_id: number;
+  unit_name: string | null;
+  orig_name: string;
+  mime: string;
+  size: number;
 }
 
 export interface MergeResult {
@@ -164,6 +320,14 @@ export interface MergeResult {
   conflicts: Array<{ type: string; message: string }>;
 }
 
+export interface MergePreflight {
+  ok: boolean;
+  blockers: Array<{ source: string; code: string; message: string }>;
+  conflicts: Array<{ source: string; type: string; resolution: string; message: string }>;
+  sources: Array<{ name: string; project_uuid: string; units: number; issues: number; attachments: number }>;
+  confirmation_token: string;
+}
+
 export interface BatchRenameResult {
   renamed: number;
   conflicts: Array<{ id: number; name: string; reason: string }>;
@@ -175,7 +339,10 @@ export interface FolderUploadItem {
 }
 
 export type IssueChanges = Pick<Issue,
-  "department" | "category" | "defect_type" | "defect_desc" | "amount" | "regulation_basis" | "suggestion" | "author" | "reviewer">;
+  "department" | "category" | "defect_type" | "defect_desc" | "amount" | "regulation_basis" | "suggestion" | "author" | "reviewer"> & {
+  currency?: string;
+  amount_unit?: string;
+};
 
 interface ApiErrorBody {
   detail?: string;
@@ -208,8 +375,8 @@ class ApiClient {
     return body as T;
   }
 
-  async login(operator: string): Promise<{ token: string; operator: string }> {
-    const result = await this.request<{ token: string; operator: string }>("/api/session", {
+  async login(operator: string): Promise<{ token: string; operator: string; account_id: string; device_id: string }> {
+    const result = await this.request<{ token: string; operator: string; account_id: string; device_id: string }>("/api/session", {
       method: "POST",
       body: JSON.stringify({ operator }),
     });
@@ -225,7 +392,7 @@ class ApiClient {
     sessionStorage.removeItem("audit_operator");
   }
 
-  currentSession(): Promise<{ operator: string }> {
+  currentSession(): Promise<{ operator: string; account_id: string; device_id: string; project_preempted?: boolean }> {
     return this.request("/api/session");
   }
 
@@ -233,7 +400,7 @@ class ApiClient {
     return this.request("/api/session", { method: "DELETE" });
   }
 
-  chooseFolder(): Promise<{ path: string }> {
+  chooseFolder(): Promise<{ path: string; warning?: string }> {
     return this.request("/api/system/choose-folder", { method: "POST" });
   }
 
@@ -367,6 +534,24 @@ class ApiClient {
     return this.request("/api/import/merge", { method: "POST", body: form });
   }
 
+  mergeLocalBackups(backupPaths: string[]): Promise<MergeResult> {
+    return this.mergeLocalBackupsConfirmed(backupPaths, "");
+  }
+
+  mergeLocalBackupsConfirmed(backupPaths: string[], confirmationToken: string): Promise<MergeResult> {
+    return this.request("/api/import/merge-local", {
+      method: "POST",
+      body: JSON.stringify({ backup_paths: backupPaths, confirmation_token: confirmationToken }),
+    });
+  }
+
+  mergeLocalPreflight(backupPaths: string[]): Promise<MergePreflight> {
+    return this.request("/api/import/merge-local/preflight", {
+      method: "POST",
+      body: JSON.stringify({ backup_paths: backupPaths }),
+    });
+  }
+
   exportExcel(scope: "project" | "unit", unitId?: number): Promise<ExportResult> {
     return this.request("/api/export/excel", {
       method: "POST",
@@ -374,9 +559,9 @@ class ApiClient {
     });
   }
 
-  packageProject(unitIds: number[], groupByDepartment: boolean): Promise<PackageResult> {
+  packagePreflight(unitIds: number[], groupByDepartment: boolean): Promise<ArchivePreflight> {
     const selected = unitIds.length > 0;
-    return this.request("/api/export/package", {
+    return this.request("/api/export/package/preflight", {
       method: "POST",
       body: JSON.stringify({
         scope: selected ? "selected" : "all",
@@ -386,8 +571,44 @@ class ApiClient {
     });
   }
 
+  packageProject(unitIds: number[], groupByDepartment: boolean, confirmationToken: string): Promise<PackageResult> {
+    const selected = unitIds.length > 0;
+    return this.request("/api/export/package", {
+      method: "POST",
+      body: JSON.stringify({
+        scope: selected ? "selected" : "all",
+        unit_ids: unitIds,
+        group_by_dept: groupByDepartment,
+        confirmation_token: confirmationToken,
+      }),
+    });
+  }
+
   createBackup(): Promise<BackupResult> {
     return this.request("/api/backup/create", { method: "POST" });
+  }
+
+  backupSettings(): Promise<BackupSettings> {
+    return this.request("/api/backup/settings");
+  }
+
+  saveBackupSettings(values: Pick<BackupSettings, "enabled" | "target_dir" | "interval_minutes" | "retention_days" | "max_bytes">): Promise<BackupSettings> {
+    return this.request("/api/backup/settings", { method: "POST", body: JSON.stringify(values) });
+  }
+
+  createRecoveryPoint(): Promise<{ job_id: string; status: string }> {
+    return this.request("/api/backup/recovery-point", { method: "POST" });
+  }
+
+  recoveryPoints(): Promise<RecoveryPoint[]> {
+    return this.request("/api/backup/recovery-points");
+  }
+
+  restoreRecoveryPoint(recoveryPointId: string, targetDir: string): Promise<{ path: string }> {
+    return this.request("/api/backup/recovery-points/restore", {
+      method: "POST",
+      body: JSON.stringify({ recovery_point_id: recoveryPointId, target_dir: targetDir }),
+    });
   }
 
   restoreBackup(file: File, targetDir: string): Promise<{ path: string }> {
@@ -395,6 +616,13 @@ class ApiClient {
     form.append("file", file, file.name);
     form.append("target_dir", targetDir);
     return this.request("/api/backup/restore", { method: "POST", body: form });
+  }
+
+  restoreLocalBackup(backupPath: string, targetDir: string): Promise<{ path: string }> {
+    return this.request("/api/backup/restore-local", {
+      method: "POST",
+      body: JSON.stringify({ backup_path: backupPath, target_dir: targetDir }),
+    });
   }
 
   resetProject(confirmText: string): Promise<{ ok: boolean }> {
@@ -435,8 +663,101 @@ class ApiClient {
     return this.request(`/api/issues/${issueId}`, { method: "PATCH", body: JSON.stringify(values) });
   }
 
+  startExchange(issueId: number): Promise<ExchangeSession> {
+    return this.request(`/api/issues/${issueId}/exchange`, { method: "POST" });
+  }
+
+  exchange(sessionUuid: string): Promise<ExchangeSession> {
+    return this.request(`/api/exchanges/${sessionUuid}`);
+  }
+
+  proposeExchangeRevision(sessionUuid: string, fieldName: string, newValue: string, reason: string): Promise<ExchangeSession> {
+    return this.request(`/api/exchanges/${sessionUuid}/revisions`, {
+      method: "POST", body: JSON.stringify({ field_name: fieldName, new_value: newValue, reason }),
+    });
+  }
+
+  decideExchangeRevision(sessionUuid: string, revisionUuid: string, decision: ExchangeRevisionStatus): Promise<ExchangeSession> {
+    return this.request(`/api/exchanges/${sessionUuid}/revisions/${revisionUuid}/decision`, {
+      method: "POST", body: JSON.stringify({ decision }),
+    });
+  }
+
+  addExchangeComment(sessionUuid: string, body: string, anchorField = "", revisionUuid = ""): Promise<ExchangeSession> {
+    return this.request(`/api/exchanges/${sessionUuid}/comments`, {
+      method: "POST", body: JSON.stringify({ body, anchor_field: anchorField, revision_uuid: revisionUuid }),
+    });
+  }
+
+  createExchangeRequest(sessionUuid: string, content: string): Promise<ExchangeSession> {
+    return this.request(`/api/exchanges/${sessionUuid}/requests`, { method: "POST", body: JSON.stringify({ content }) });
+  }
+
+  updateExchangeRequest(sessionUuid: string, requestUuid: string, status: ExchangeRequestStatus,
+                        providedFileId: number | null, note: string): Promise<ExchangeSession> {
+    return this.request(`/api/exchanges/${sessionUuid}/requests/${requestUuid}`, {
+      method: "PATCH", body: JSON.stringify({ status, provided_file_id: providedFileId, note }),
+    });
+  }
+
+  applyExchangeRevisions(sessionUuid: string): Promise<{ session: ExchangeSession; issue: Issue }> {
+    return this.request(`/api/exchanges/${sessionUuid}/apply`, { method: "POST" });
+  }
+
+  closeExchange(sessionUuid: string, note = ""): Promise<ExchangeSession> {
+    return this.request(`/api/exchanges/${sessionUuid}/close`, { method: "POST", body: JSON.stringify({ note }) });
+  }
+
   deleteIssue(issueId: number): Promise<{ ok: boolean }> {
     return this.request(`/api/issues/${issueId}`, { method: "DELETE" });
+  }
+
+  recycledIssues(): Promise<RecycledIssue[]> {
+    return this.request("/api/recycle/issues");
+  }
+
+  recycledIssuePreview(recycleId: number): Promise<RecycledIssuePreview> {
+    return this.request(`/api/recycle/issues/${recycleId}`);
+  }
+
+  restoreRecycledIssue(recycleId: number): Promise<Issue> {
+    return this.request(`/api/recycle/issues/${recycleId}/restore`, { method: "POST" });
+  }
+
+  purgeRecycledIssue(recycleId: number): Promise<{ ok: boolean }> {
+    return this.request(`/api/recycle/issues/${recycleId}`, { method: "DELETE" });
+  }
+
+  recycledUnits(): Promise<RecycledUnit[]> {
+    return this.request("/api/recycle/units");
+  }
+
+  restoreRecycledUnit(recycleId: number): Promise<Unit> {
+    return this.request(`/api/recycle/units/${recycleId}/restore`, { method: "POST" });
+  }
+
+  purgeRecycledUnit(recycleId: number): Promise<{ ok: boolean }> {
+    return this.request(`/api/recycle/units/${recycleId}`, { method: "DELETE" });
+  }
+
+  recycledFiles(): Promise<RecycledFile[]> {
+    return this.request("/api/recycle/files");
+  }
+
+  restoreRecycledFile(recycleId: number): Promise<EvidenceFile> {
+    return this.request(`/api/recycle/files/${recycleId}/restore`, { method: "POST" });
+  }
+
+  purgeRecycledFile(recycleId: number): Promise<{ ok: boolean }> {
+    return this.request(`/api/recycle/files/${recycleId}`, { method: "DELETE" });
+  }
+
+  amountSettings(): Promise<AmountSettings> {
+    return this.request("/api/settings/amount");
+  }
+
+  saveAmountSettings(values: Pick<AmountSettings, "currency" | "amount_unit">): Promise<AmountSettings> {
+    return this.request("/api/settings/amount", { method: "PUT", body: JSON.stringify(values) });
   }
 
   transitionIssue(issueId: number, status: IssueStatus, comment = ""): Promise<Issue> {

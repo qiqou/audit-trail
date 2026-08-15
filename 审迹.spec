@@ -8,6 +8,8 @@
 #   - macOS: COLLECT + BUNDLE → 审迹.app（一目录形态，双击即用）
 #   - Windows: 单 EXE（--onefile 等价，不用 BUNDLE）
 # 产物名 / 版本 / 包 ID 统一读 backend/version.py，避免多处漂移。
+import os
+import platform
 import sys
 from pathlib import Path
 
@@ -19,6 +21,11 @@ from version import APP_NAME, APP_VERSION, BUNDLE_ID  # noqa: E402
 
 IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform == "win32"
+
+# 产品范围冻结为 Apple Silicon。Intel Mac 不在 v1.2 支持范围内，不能在
+# x86_64 构建机上悄悄生成一个未验证的包后误发给用户。
+if IS_MAC and platform.machine() != "arm64":
+    raise SystemExit("macOS 发布包仅支持 Apple Silicon；请在 arm64 macOS 14 构建机上打包。")
 
 # Windows 版本资源（EXE 属性里的版本信息）。
 # 注意：PyInstaller 6.x 的 EXE(version=) 参数要求 VSVersionInfo 对象或资源文件路径，
@@ -99,6 +106,8 @@ exe = EXE(
     upx=False,
     console=False,          # windowed：不弹终端
     disable_windowed_traceback=False,
+    # macOS 构建机已强制 arm64；显式写入，避免构建环境变化时产物架构漂移。
+    target_arch="arm64" if IS_MAC else None,
     # Windows 版本资源（VSVersionInfo 对象）；macOS 忽略
     version=win_version_info,
 )
@@ -115,7 +124,7 @@ if IS_MAC:
     app = BUNDLE(
         coll,
         name=f'{APP_NAME}.app',
-        icon=None,
+        icon=os.path.join(SPECPATH, 'assets', '审迹.icns'),
         bundle_identifier=BUNDLE_ID,
         info_plist={
             'CFBundleDisplayName': APP_NAME,

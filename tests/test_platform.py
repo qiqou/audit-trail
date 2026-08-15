@@ -21,6 +21,7 @@ from platform_adapter import (
     open_path,
     port_in_use,
     release_single_instance,
+    spawn_detached,
     write_instance_endpoint,
 )
 
@@ -121,3 +122,48 @@ def test_platform_error_messages_are_actionable():
     ]
     for e in errs:
         assert "请" in str(e) or "重试" in str(e)
+
+
+def test_spawn_detached_uses_platform_specific_flags(monkeypatch):
+    """启动器/重启共用平台层；Windows 不得沿用 POSIX 的新会话参数。"""
+    captured = {}
+    monkeypatch.setattr("platform_adapter._is_windows", lambda: True)
+    monkeypatch.setattr(
+        "platform_adapter.subprocess.Popen",
+        lambda command, **kwargs: captured.update(command=command, **kwargs),
+    )
+
+    spawn_detached(["审迹.exe"])
+
+    assert captured["command"] == ["审迹.exe"]
+    assert captured["creationflags"]
+    assert "start_new_session" not in captured
+
+
+def test_current_os_identity_uses_windows_sid_when_available(monkeypatch, tmp_path):
+    """Windows 日志身份优先记录 SID，不依赖可被同名账户复用的显示名称。"""
+    monkeypatch.setattr("platform_adapter.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("platform_adapter._is_windows", lambda: True)
+    monkeypatch.setattr("platform_adapter.getpass.getuser", lambda: "audit.user")
+    monkeypatch.setattr("platform_adapter.os.environ", {"USERDOMAIN": "AUDIT"})
+    monkeypatch.setattr(
+        "platform_adapter.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, '"AUDIT\\\\audit.user","S-1-5-21-100"\n', ""),
+    )
+
+    from platform_adapter import current_os_identity
+
+    identity = current_os_identity()
+    assert identity.account_name == "audit.user"
+    assert identity.account_id == "S-1-5-21-100"
+    assert identity.device_id
+
+
+def test_os_identity_does_not_fail_when_config_directory_is_not_writable(monkeypatch, tmp_path):
+    """安装 ID 落盘失败只能降低追溯粒度，不能让使用人无法进入工作台。"""
+    monkeypatch.setattr("platform_adapter.CONFIG_DIR", tmp_path / "blocked")
+    monkeypatch.setattr("platform_adapter.Path.write_text", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("denied")))
+
+    from platform_adapter import current_os_identity
+
+    assert current_os_identity().device_id

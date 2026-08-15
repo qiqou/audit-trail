@@ -11,6 +11,7 @@
 """
 
 import json
+import os
 
 from database import SCHEMA_VERSION
 
@@ -53,10 +54,13 @@ def test_health_detects_orphan_link(proj):
     f = proj.add_file(uid, src, "张三", orig_name="a.pdf")
     proj.link_file(iid, f["id"], "张三")
 
-    # 直接删底稿记录（绕过业务层），留下孤儿关联
-    with proj._lock, proj._conn:
+    # 模拟来自旧版本/外部工具的损坏库。正常业务连接由外键阻止这种状态。
+    with proj._lock:
+        proj._conn.commit()
+        proj._conn.execute("PRAGMA foreign_keys = OFF")
         proj._conn.execute("DELETE FROM issues WHERE id=?", (iid,))
         proj._conn.commit()
+        proj._conn.execute("PRAGMA foreign_keys = ON")
 
     h = proj.health_check()
     types = {p["type"] for p in h["problems"]}
@@ -72,10 +76,13 @@ def test_health_detects_orphan_issue_and_filerow(proj):
     src.write_bytes(b"b")
     proj.add_file(uid, src, "张三", orig_name="b.pdf")
 
-    # 直接删单位记录，留下孤儿底稿 + 孤儿附件记录
-    with proj._lock, proj._conn:
+    # 模拟受损旧库；正常业务连接会因 ON DELETE RESTRICT 拒绝此删除。
+    with proj._lock:
+        proj._conn.commit()
+        proj._conn.execute("PRAGMA foreign_keys = OFF")
         proj._conn.execute("DELETE FROM units WHERE id=?", (uid,))
         proj._conn.commit()
+        proj._conn.execute("PRAGMA foreign_keys = ON")
 
     h = proj.health_check()
     types = {p["type"] for p in h["problems"]}
@@ -120,6 +127,24 @@ def test_health_detects_missing_folder(proj):
     assert any("证据包" in p["message"] for p in h["problems"])
 
 
+def test_health_detects_folder_member_change_by_directory_digest(proj):
+    """文件夹内任一成员被改动，必须命中 P0 目录摘要不一致。"""
+    uid = proj.add_unit("华电集团XX电厂", "张三")
+    tmp = proj.root / "tmp_digest_folder"
+    tmp.mkdir()
+    member = tmp / "子目录" / "证据.txt"
+    member.parent.mkdir()
+    member.write_text("原始证据", encoding="utf-8")
+    folder = proj.add_folder(uid, [("子目录/证据.txt", member)], "合同资料", "张三")
+
+    (proj.root / folder["rel_path"] / "子目录" / "证据.txt").write_text("已被修改", encoding="utf-8")
+
+    health = proj.health_check(sample_size=0)
+    types = {problem["type"] for problem in health["problems"]}
+    assert "folder_hash_mismatch" in types
+    assert any(problem["severity"] == "P0" for problem in health["problems"])
+
+
 def test_health_detects_orphan_phys(proj):
     """附件库存在未登记文件 → P1 orphan_phys。"""
     uid = proj.add_unit("华电集团XX电厂", "张三")
@@ -133,17 +158,35 @@ def test_health_detects_orphan_phys(proj):
     assert any("stray.pdf" in p["message"] for p in h["problems"])
 
 
-def test_health_ignores_hidden_files(proj):
-    """附件库内隐藏文件（.DS_Store 等系统元数据）不报孤儿。"""
+def test_health_ignores_only_system_metadata(proj):
+    """仅 .DS_Store 属系统元数据；隐藏业务文件不得被静默忽略。"""
     uid = proj.add_unit("华电集团XX电厂", "张三")
     (proj.root / "附件库" / ".DS_Store").write_bytes(b"meta")
     (proj.root / "附件库" / f"unit_{uid}" / ".DS_Store").write_bytes(b"meta")
-    (proj.root / "附件库" / f"unit_{uid}" / ".hidden_dir").mkdir()
-    (proj.root / "附件库" / f"unit_{uid}" / ".hidden_dir" / "x.pdf").write_bytes(b"x")
-
     h = proj.health_check()
     assert h["ok"] is True
     assert h["problems"] == []
+
+    hidden_business = proj.root / "附件库" / f"unit_{uid}" / ".hidden_dir" / "合同.pdf"
+    hidden_business.parent.mkdir()
+    hidden_business.write_bytes(b"business-evidence")
+    h = proj.health_check()
+    assert any(problem["type"] == "orphan_phys" and ".hidden_dir" in problem["message"] for problem in h["problems"])
+
+
+def test_health_checks_hidden_folder_member_digest(proj):
+    """隐藏业务成员参与文件夹摘要，篡改后必须阻断归档。"""
+    uid = proj.add_unit("华电集团XX电厂", "张三")
+    source = proj.root / "tmp_hidden_folder"
+    hidden = source / ".保密" / "合同.pdf"
+    hidden.parent.mkdir(parents=True)
+    hidden.write_bytes(b"original")
+    folder = proj.add_folder(uid, [(".保密/合同.pdf", hidden)], "保密资料", "张三")
+
+    stored = proj.root / folder["rel_path"] / ".保密" / "合同.pdf"
+    stored.write_bytes(b"tampered")
+    h = proj.health_check(sample_size=0)
+    assert any(problem["type"] == "folder_hash_mismatch" for problem in h["problems"])
 
 
 def test_health_detects_hash_mismatch(proj):
@@ -177,6 +220,35 @@ def test_health_sample_size_limits_hash_checks(proj):
 
     h_all = proj.health_check(sample_size=0)
     assert h_all["sample"]["checked"] == 3
+
+
+def test_health_sample_reuses_unchanged_hash_but_full_check_bypasses_cache(proj, tmp_path, monkeypatch):
+    """常规抽查可复用未变化摘要；归档前全量检查必须重新读取物理文件。"""
+    uid = proj.add_unit("华电集团XX电厂", "张三")
+    source = tmp_path / "cache.pdf"
+    source.write_bytes(b"cache-content")
+    evidence = proj.add_file(uid, source, "张三")
+    path = proj.root / evidence["rel_path"]
+    original_hash = proj._sha256
+    calls = 0
+
+    def counted_hash(target):
+        nonlocal calls
+        calls += 1
+        return original_hash(target)
+
+    monkeypatch.setattr(proj, "_sha256", counted_hash)
+    assert proj.health_check(sample_size=1)["ok"] is True
+    assert proj.health_check(sample_size=1)["ok"] is True
+    assert calls == 1
+
+    path.write_bytes(b"cache-change!!")
+    os.utime(path, None)
+    assert proj.health_check(sample_size=1)["ok"] is False
+    assert calls == 2
+
+    assert proj.health_check(sample_size=0)["ok"] is False
+    assert calls == 3
 
 
 def test_manifest_written(proj):

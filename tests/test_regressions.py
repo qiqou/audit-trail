@@ -4,10 +4,49 @@
 用例名带 F-xx 编号，便于对照报告定位。
 """
 
+import os
+import sqlite3
+import threading
+import time
 import zipfile
 from pathlib import Path
 
 import pytest
+
+
+def test_f14_resolves_symlinked_project_root(tmp_path):
+    """项目路径经 /var 等符号链接进入时，附件路径仍能稳定计算。"""
+    from database import AuditProject
+
+    actual = tmp_path / "实际项目"
+    actual.mkdir()
+    linked = tmp_path / "项目链接"
+    linked.symlink_to(actual, target_is_directory=True)
+    project = AuditProject(linked)
+    try:
+        assert project.root == actual.resolve()
+        unit_id = project.add_unit("测试单位", "张三")
+        assert (project.root / "附件库" / project.unit_dir_name(unit_id)).is_relative_to(actual.resolve())
+    finally:
+        project.close()
+
+
+def test_f15_core_relations_are_enforced_by_sqlite(proj):
+    """新项目必须由 SQLite 约束阻止孤儿数据和重复活动编号。"""
+    foreign_tables = {str(row[2]) for row in proj._conn.execute("PRAGMA foreign_key_list(issues)").fetchall()}
+    assert "units" in foreign_tables
+
+    with pytest.raises(sqlite3.IntegrityError), proj._lock, proj._conn:
+        proj._conn.execute(
+            "INSERT INTO issues(unit_id, seq, status) VALUES(?,?,?)", (999999, 1, "草稿")
+        )
+
+    unit_id = proj.add_unit("测试单位", "张三")
+    proj.add_issue(unit_id, "张三", department="测试", defect_type="问题")
+    with pytest.raises(sqlite3.IntegrityError), proj._lock, proj._conn:
+        proj._conn.execute(
+            "INSERT INTO issues(unit_id, seq, status) VALUES(?,?,?)", (unit_id, 1, "草稿")
+        )
 
 # ───────────────────────── F-02 部分更新清空未提交字段 ─────────────────────────
 
@@ -54,7 +93,7 @@ def test_f01_delete_unit_keeps_cross_unit_attachment(proj, tmp_path):
 
 
 def test_f01_delete_unit_ok_without_cross_refs(proj, tmp_path):
-    """无跨单位引用时，删除单位仍正常（同单位底稿引用随单位一起删）。"""
+    """无跨单位引用时，单位可移入回收站，证据仍保留至明确清空。"""
     ua = proj.add_unit("单位A", "张三")
     ia = proj.add_issue(ua, "张三", department="营销管理", defect_type="问题A")
     src = tmp_path / "证据.pdf"
@@ -63,8 +102,9 @@ def test_f01_delete_unit_ok_without_cross_refs(proj, tmp_path):
     proj.link_file(ia, f["id"], "张三")  # 同单位引用，允许删除
 
     proj.delete_unit(ua, "张三")
-    assert not (proj.root / f["rel_path"]).exists()
+    assert (proj.root / f["rel_path"]).exists()
     assert proj.list_units() == []
+    assert proj.list_recycled_units()[0]["id"] == ua
 
 
 # ───────────────────────── F-05 单位名清洗目录碰撞 ─────────────────────────
@@ -193,6 +233,94 @@ def test_f04_restore_failure_no_partial_dir(proj, tmp_path):
         restore_backup(str(bad), str(target))
     # 校验失败时目标目录不应被创建（先完整校验再原子落盘）
     assert not target.exists(), "校验失败不应创建目标目录"
+
+
+# ───────────────────────── F-12 备份快照一致性 ─────────────────────────
+
+def test_f12_backup_uses_snapshot_registry_and_rejects_changed_evidence(proj, tmp_path, monkeypatch):
+    """备份不得带入未登记文件，登记附件在写入期间变化必须失败而非产出伪成功包。"""
+    from export import create_backup
+
+    unit_id = proj.add_unit("华电集团XX电厂", "张三")
+    source = tmp_path / "原始证据.txt"
+    source.write_text("已登记证据", encoding="utf-8")
+    evidence = proj.add_file(unit_id, source, "张三")
+    physical = proj.attachment_path(evidence["rel_path"])
+    (physical.parent / "未登记的临时文件.txt").write_text("不应进入备份", encoding="utf-8")
+
+    monkeypatch.setattr("export._now_ts", lambda: "20260814_120000")
+    first = create_backup(proj)
+    with zipfile.ZipFile(first["abs_path"]) as package:
+        assert "附件库/" + evidence["rel_path"].removeprefix("附件库/") in package.namelist()
+        assert not any("未登记的临时文件" in name for name in package.namelist())
+
+    physical.write_text("被外部修改的证据", encoding="utf-8")
+    with pytest.raises(ValueError, match="附件内容已变化"):
+        create_backup(proj)
+    assert not list(proj.root.parent.glob("*.auditbak.tmp")), "失败时不得保留半成品备份"
+
+
+def test_f12_restore_rejects_missing_or_replaced_registered_attachment(proj, tmp_path):
+    """恢复必须在落项目目录前发现 ZIP 内被替换的附件。"""
+    from export import create_backup, restore_backup
+
+    unit_id = proj.add_unit("华电集团XX电厂", "张三")
+    source = tmp_path / "原始证据.txt"
+    source.write_text("可核验的原始内容", encoding="utf-8")
+    evidence = proj.add_file(unit_id, source, "张三")
+    backup = create_backup(proj)
+    tampered = Path(backup["abs_path"]).with_suffix(".tampered")
+    with zipfile.ZipFile(backup["abs_path"]) as package, zipfile.ZipFile(tampered, "w") as rewritten:
+        for info in package.infolist():
+            if info.filename != evidence["rel_path"]:
+                rewritten.writestr(info, package.read(info.filename))
+        rewritten.writestr(evidence["rel_path"], "被替换的内容")
+    os.replace(tampered, backup["abs_path"])
+
+    target = tmp_path / "不应恢复成功"
+    with pytest.raises(ValueError, match="附件摘要不一致"):
+        restore_backup(backup["abs_path"], target)
+    assert not target.exists()
+    assert not target.with_name(target.name + ".auditproj").exists()
+
+
+def test_f12_backup_queues_project_writes_until_snapshot_is_complete(proj, tmp_path, monkeypatch):
+    """P0：备份持锁期间，新业务写入必须排队，不能混入同一次快照。"""
+    import export
+    from export import create_backup
+
+    unit_id = proj.add_unit("华电集团XX电厂", "张三")
+    source = tmp_path / "证据.txt"
+    source.write_text("稳定证据", encoding="utf-8")
+    proj.add_file(unit_id, source, "张三")
+    entered = threading.Event()
+    release = threading.Event()
+    original_writer = export._write_streamed_archive_file
+
+    def slow_writer(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=2)
+        return original_writer(*args, **kwargs)
+
+    monkeypatch.setattr(export, "_write_streamed_archive_file", slow_writer)
+    backup_thread = threading.Thread(target=lambda: create_backup(proj), daemon=True)
+    backup_thread.start()
+    assert entered.wait(timeout=2)
+
+    write_done = threading.Event()
+
+    def write_project():
+        proj.add_unit("备份期间新增单位", "李四")
+        write_done.set()
+
+    writer_thread = threading.Thread(target=write_project, daemon=True)
+    writer_thread.start()
+    time.sleep(0.05)
+    assert not write_done.is_set(), "备份期间的写请求不得越过项目锁"
+    release.set()
+    backup_thread.join(timeout=2)
+    writer_thread.join(timeout=2)
+    assert write_done.is_set()
 
 
 # ───────────────────────── F-08 附件相对路径边界 ─────────────────────────
