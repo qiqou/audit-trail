@@ -114,19 +114,19 @@ def test_manifest_tree_hash_deterministic(tmp_path):
 
 
 def test_spec_ci_aligned():
-    """CI 双端都用 spec（与 macOS 同一入口），不再混用命令行参数。"""
+    """CI 用 spec 打包（与本地构建同一入口），不再混用命令行参数。macOS 包本地构建（build_macos.sh），CI 仅打包 Windows。"""
     ci = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "pyinstaller --noconfirm 审迹.spec" in ci
     # 不再有 --onefile 命令行打包
     assert "--onefile" not in ci
-    # 双端 job 都存在
+    # Windows 打包 job 存在（macOS 包由本地 build_macos.sh 构建）
     assert "build-windows" in ci
-    assert "build-macos" in ci
-    # 两端都生成发布产物清单
+    assert "build-macos" not in ci
+    # 生成发布产物清单
     assert "release_manifest.py" in ci
     # 发布构建的启动冒烟失败必须阻断产物上传。
     assert "continue-on-error: true" not in ci
-    assert ci.count("启动冒烟测试（发布阻断门禁）") == 2
+    assert ci.count("启动冒烟测试（发布阻断门禁）") == 1
 
 
 def test_ci_reads_the_same_instance_endpoint_as_the_application():
@@ -137,7 +137,7 @@ def test_ci_reads_the_same_instance_endpoint_as_the_application():
     lock_name = re.search(r'INSTANCE_LOCK_NAME\s*=\s*"([^"]+)"', main)
     assert lock_name is not None
     endpoint_name = f"{lock_name.group(1)}.endpoint.json"
-    assert ci.count(endpoint_name) >= 2
+    assert ci.count(endpoint_name) >= 1
     windows_build = (root / "scripts" / "build_windows.ps1").read_text(encoding="utf-8-sig")
     assert endpoint_name in windows_build
     assert "启动器会拉起独立服务子进程后退出" in windows_build
