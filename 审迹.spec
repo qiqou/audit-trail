@@ -108,6 +108,8 @@ exe = EXE(
     disable_windowed_traceback=False,
     # macOS 构建机已强制 arm64；显式写入，避免构建环境变化时产物架构漂移。
     target_arch="arm64" if IS_MAC else None,
+    # Windows 程序图标（.ico）；macOS 忽略（BUNDLE 用 .icns）
+    icon=os.path.join(SPECPATH, 'assets', '审迹.ico') if IS_WIN else None,
     # Windows 版本资源（VSVersionInfo 对象）；macOS 忽略
     version=win_version_info,
 )
