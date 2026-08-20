@@ -1,5 +1,6 @@
 """3.0 重构基础设施回归：数据库迁移快照、持久任务与动态端口。"""
 
+import shutil
 import socket
 import sqlite3
 import threading
@@ -95,6 +96,57 @@ def test_v6_project_migration_preserves_one_thousand_issue_records(tmp_path):
         assert list((root / "快照").glob("pre_migration_v6_*.db"))
     finally:
         upgraded.close()
+
+
+@pytest.mark.parametrize(
+    ("source_version", "missing_tables"),
+    [
+        (14, ("workpaper_templates", "issue_drafts", "review_note_events")),
+        (15, ("workpaper_templates", "issue_drafts", "review_note_events")),
+        (16, ("issue_drafts", "review_note_events")),
+        (17, ("issue_drafts", "review_note_events")),
+    ],
+)
+def test_v14_to_v17_migrations_keep_counts_and_preserve_a_reopenable_snapshot(
+    tmp_path, source_version, missing_tables,
+):
+    """v14→v18 每个入口均应保留 DDL 前快照，且快照本身可再次打开升级。"""
+    root = tmp_path / f"v{source_version}项目"
+    original = AuditProject(root)
+    unit_id = original.add_unit("甲单位", "张三")
+    original.add_issue(unit_id, "张三", defect_type=f"v{source_version}底稿")
+    before_counts = {
+        table: original._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in ("units", "issues", "files", "audit_log")
+    }
+    with original._lock, original._conn:
+        for table in missing_tables:
+            original._conn.execute(f"DROP TABLE {table}")
+        original._conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)", (str(source_version),)
+        )
+    original.close()
+
+    upgraded = AuditProject(root)
+    try:
+        assert upgraded.get_meta("schema_version") == str(SCHEMA_VERSION)
+        assert {
+            table: upgraded._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in before_counts
+        } == before_counts
+        snapshot = next((root / "快照").glob(f"pre_migration_v{source_version}_*.db"))
+    finally:
+        upgraded.close()
+
+    recovered_root = tmp_path / f"v{source_version}快照恢复"
+    recovered_root.mkdir()
+    shutil.copy2(snapshot, recovered_root / "audit.db")
+    recovered = AuditProject(recovered_root)
+    try:
+        assert recovered.get_meta("schema_version") == str(SCHEMA_VERSION)
+        assert recovered._conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0] == before_counts["issues"]
+    finally:
+        recovered.close()
 
 
 def test_real_v11_table_layout_migrates_by_column_name_and_keeps_exchange_foreign_keys(tmp_path):

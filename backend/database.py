@@ -45,9 +45,9 @@ from domain.review_workflow import (
     note_state,
     validate_review_event,
 )
-from repositories.units import UnitRepository
-from repositories.issues import IssueRepository
 from repositories.evidence import EvidenceRepository
+from repositories.issues import IssueRepository
+from repositories.units import UnitRepository
 from rich_text import rich_html_to_plain_text, sanitize_rich_html
 
 DB_FILE = "audit.db"
