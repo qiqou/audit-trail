@@ -2,7 +2,8 @@
 import { computed, onBeforeUnmount, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import { api, type AmountSettings, type ArchivePreflight, type AuditLog, type BatchIssueMetadataChanges, type BackupSettings, type ExcelImportPreflight, type ImportResult, type MergePreflight, type MergeResult, type ProjectInfo, type ProjectSummary, type RecycledFile, type RecycledIssue, type RecycledIssuePreview, type RecycledUnit, type RecoveryPoint, type ScanStatus, type SearchResult, type SummaryIssue, type Unit } from "../api/client";
+import { api, type AmountSettings, type ArchivePreflight, type AuditLog, type BatchIssueMetadataChanges, type BackupSettings, type ExcelImportPreflight, type ImportResult, type MergePreflight, type MergeResult, type ProjectInfo, type ProjectSummary, type RecycledFile, type RecycledIssue, type RecycledIssuePreview, type RecycledUnit, type RecoveryPoint, type ScanStatus, type SummaryIssue, type Unit } from "../api/client";
+import { useGlobalSearch } from "../features/projectOperations/useGlobalSearch";
 import { formatIssueNo } from "../format";
 
 type AutoSaveMode = "realtime" | "5m" | "20m";
@@ -86,12 +87,6 @@ const scan = ref<ScanStatus | null>(null);
 const projectNameDraft = ref("");
 let scanTimer: ReturnType<typeof window.setTimeout> | undefined;
 
-// ── 全局搜索状态 ──
-const searchQuery = ref("");
-const searchResult = ref<SearchResult | null>(null);
-const searchLoading = ref(false);
-let searchTimer: ReturnType<typeof window.setTimeout> | undefined;
-
 // ── 问题清单筛选状态（summary 面板）──
 const summaryUnitFilter = ref<number | null>(null);
 const summaryStatusFilter = ref("");
@@ -100,32 +95,6 @@ const summaryEvidenceFilter = ref<"" | "with_evidence" | "without_evidence">("")
 const selectedSummaryIssueIds = ref<number[]>([]);
 const batchMetadataField = ref<keyof BatchIssueMetadataChanges>("department");
 const batchMetadataValue = ref("");
-
-function openSearch(): void {
-  show("search");
-  if (searchQuery.value.trim()) void runSearch();
-}
-
-async function runSearch(): Promise<void> {
-  const q = searchQuery.value.trim();
-  if (!q) {
-    searchResult.value = null;
-    return;
-  }
-  searchLoading.value = true;
-  try {
-    searchResult.value = await api.search(q);
-  } catch (error) {
-    report(error);
-  } finally {
-    searchLoading.value = false;
-  }
-}
-
-function onSearchInput(): void {
-  window.clearTimeout(searchTimer);
-  searchTimer = window.setTimeout(() => { void runSearch(); }, 300);
-}
 
 function formatAmount(value: string | number | null | undefined): string {
   if (value === null || value === undefined || value === "") return "—";
@@ -234,6 +203,13 @@ const dialogWidth = computed(() => activePanel.value === "summary"
     : "min(560px, calc(100vw - 32px))");
 function report(error: unknown): void {
   ElMessage.error(error instanceof Error ? error.message : "项目操作失败，请重试");
+}
+
+const { searchQuery, searchResult, searchLoading, runSearch, onSearchInput, dispose: disposeGlobalSearch } = useGlobalSearch(report);
+
+function openSearch(): void {
+  show("search");
+  if (searchQuery.value.trim()) void runSearch();
 }
 
 function show(panel: Panel | string): void {
@@ -815,7 +791,10 @@ async function renameProject(): Promise<void> {
   }
 }
 
-onBeforeUnmount(() => window.clearTimeout(scanTimer));
+onBeforeUnmount(() => {
+  window.clearTimeout(scanTimer);
+  disposeGlobalSearch();
+});
 
 function inputFile(event: Event, target: "import" | "restore"): void {
   const file = (event.target as HTMLInputElement).files?.[0] ?? null;
