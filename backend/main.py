@@ -18,7 +18,6 @@ import threading
 import time
 import traceback
 import uuid
-from contextvars import ContextVar
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
@@ -30,34 +29,22 @@ from starlette.concurrency import run_in_threadpool
 # 兼容两种启动方式：`python backend/main.py` 与 `uvicorn main:app`（根目录转发）
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from api.dependencies import SessionContext, SessionRegistry, get_current_context, session_context
 from api_models import (
     BackupSettingsReq,
-    BatchIssueMetadataReq,
     BatchRenameReq,
     CreateReq,
-    DuplicateIssueReq,
-    ExchangeCloseReq,
-    ExchangeCommentReq,
-    ExchangeRequestReq,
-    ExchangeRequestUpdateReq,
-    ExchangeRevisionDecisionReq,
-    ExchangeRevisionReq,
     ExportReq,
     FolderReq,
-    IssueReq,
     LocalBackupRestoreReq,
     LocalMergeReq,
     MoveFileReq,
     NameReq,
     OpenReq,
     OperatorReq,
-    OrderReq,
     PackageReq,
     RecoveryPointRestoreReq,
     ResetReq,
-    StatusReq,
-    WorkpaperTemplateApplyReq,
-    WorkpaperTemplateCreateReq,
 )
 from app import create_app, mount_frontend
 from app_launcher import launch_service, serve_app
@@ -65,7 +52,6 @@ from config import PROJECT_EXT, RuntimeSettings
 from database import OUT_DIR, SYSTEM_METADATA_NAMES, AuditProject
 from jobs import JobContext, job_runner
 from platform_adapter import (
-    OSIdentity,
     PlatformError,
     current_os_identity,
     forget_recent,
@@ -78,6 +64,9 @@ from platform_adapter import (
 from platform_adapter import (
     choose_folder as platform_choose_folder,
 )
+from routers.exchanges import build_router as build_exchanges_router
+from routers.issues import build_router as build_issues_router
+from routers.recycle import build_router as build_recycle_router
 from routers.settings import build_router as build_settings_router
 from routers.units import build_router as build_units_router
 from runtime_log import log_runtime_event
@@ -137,29 +126,11 @@ app = create_app()
 # 会话表：token → 会话上下文（使用人 + 该会话打开的项目）。
 # 每个会话独立持有项目；同一项目同时只允许一个会话写入，避免第二标签页
 # 或第二浏览器连接造成 SQLite 并发写入。
-# 启动弹窗登录换取 token（HTTP header 只传 ASCII 安全值，中文直接放 header
-# 会被 Latin-1 解码成乱码，浏览器 fetch 也会拒绝）。
-class SessionContext:
-    def __init__(self, token: str, operator: str, identity: OSIdentity):
-        self.token = token
-        self.identity = identity
-        # 使用人姓名是审计留痕的主字段，由现场人员明确输入；OS 账户仅作为
-        # 第二道来源核验字段写入同一条日志，不能替代业务上的责任人署名。
-        self.operator = operator
-        self.project: AuditProject | None = None
-        self.project_key = ""
-        self.last_seen = time.monotonic()
-        self.archive_preflights: dict[str, dict] = {}
-        self.merge_preflights: dict[str, dict] = {}
-        self.batch_issue_preflights: dict[str, dict] = {}
-        # 项目租约被其他会话接管（体验优化：强制切换而非拒绝打开）；
-        # 心跳响应携带一次 project_preempted，前端据此提示并返回项目列表。
-        self.preempted = False
-
-
-_sessions: dict[str, SessionContext] = {}
-_project_leases: dict[str, str] = {}
-_project_leases_lock = threading.RLock()
+_session_registry = SessionRegistry()
+# 兼容既有测试与尚未迁移的启动逻辑：容器所有权已转入 SessionRegistry。
+_sessions = _session_registry.sessions
+_project_leases = _session_registry.project_leases
+_project_leases_lock = _session_registry.lock
 PROJECT_LEASE_SECONDS = 45
 SESSION_TTL_SECONDS = 8 * 60 * 60
 MAX_SESSIONS = 20
@@ -168,23 +139,13 @@ MAX_SESSIONS = 20
 def _expire_sessions(now: float | None = None) -> int:
     """回收过期或超出容量的浏览器会话，并释放其项目连接与单写租约。"""
     current = time.monotonic() if now is None else now
-    stale = [ctx for ctx in _sessions.values() if current - ctx.last_seen >= SESSION_TTL_SECONDS]
-    survivors = [ctx for ctx in _sessions.values() if ctx not in stale]
-    overflow = max(0, len(survivors) - MAX_SESSIONS)
-    if overflow:
-        stale.extend(sorted(survivors, key=lambda ctx: ctx.last_seen)[:overflow])
-    for ctx in stale:
-        # 后台任务仍使用此项目连接时不能直接 close；保留会话到任务结束，再由下一次
-        # 清理回收，避免扫描/备份线程访问已关闭数据库。
-        if ctx.project is not None and job_runner.has_active(ctx.project):
-            ctx.last_seen = current
-            continue
-        if _sessions.pop(ctx.token, None) is not None:
-            _close_session_project(ctx)
-    return len(stale)
+    return _session_registry.expire(
+        current, SESSION_TTL_SECONDS, MAX_SESSIONS, job_runner.has_active, _close_session_project,
+    )
 
-# 当前请求的会话上下文（HTTP 中间件设置，请求上下文链内传播）
-_ctx_var: ContextVar[SessionContext | None] = ContextVar("audit_ctx", default=None)
+# 当前请求的会话上下文（HTTP 中间件设置，请求上下文链内传播）。保留别名，
+# 使尚未迁移的处理器能行为保持地使用共享会话上下文。
+_ctx_var = session_context
 
 
 @app.middleware("http")
@@ -378,31 +339,22 @@ def _reserve_project(ctx: SessionContext, key: str) -> None:
     强制接管——吊销对方项目连接（防止双写同一 SQLite），对方通过心跳
     感知 project_preempted 后提示并返回项目列表，实现"新窗口强制切换"。
     """
-    with _project_leases_lock:
-        owner = _project_leases.get(key)
-        if owner and owner != ctx.token:
-            owner_ctx = _sessions.get(owner)
-            if owner_ctx is not None:
-                # 吊销旧会话项目连接；其后续写请求会因项目未打开而得到明确错误
-                try:
-                    _close_session_project(owner_ctx, preserve_key=key)
-                except Exception as exc:
-                    log_runtime_event(
-                        "warning", "lease_preempt_close_failed",
-                        message="接管项目租约时关闭旧会话项目失败",
-                        error_type=type(exc).__name__, detail=str(exc),
-                    )
-                owner_ctx.preempted = True
-        _project_leases[key] = ctx.token
+    def close_previous(owner_ctx: SessionContext) -> None:
+        _close_session_project(owner_ctx, preserve_key=key)
+
+    def record_failure(exc: Exception) -> None:
+        log_runtime_event(
+            "warning", "lease_preempt_close_failed",
+            message="接管项目租约时关闭旧会话项目失败",
+            error_type=type(exc).__name__, detail=str(exc),
+        )
+
+    _session_registry.reserve(ctx, key, close_previous, record_failure)
 
 
 def _release_project_lease(ctx: SessionContext, key: str = "") -> None:
     target = key or ctx.project_key
-    if not target:
-        return
-    with _project_leases_lock:
-        if _project_leases.get(target) == ctx.token:
-            _project_leases.pop(target, None)
+    _session_registry.release(ctx, target)
 
 
 # ───────────────────────── 项目 ─────────────────────────
@@ -701,376 +653,9 @@ def _close_current_project(preserve_key: str = ""):
 # 的 URL、方法和响应不变，后续按相同模式继续拆分项目、单位、底稿等模块。
 app.include_router(build_settings_router(get_project, get_operator))
 app.include_router(build_units_router(get_project, get_operator, _require_project_idle))
-
-
-# ───────────────────────── 底稿 ─────────────────────────
-
-@app.get("/api/units/{unit_id}/issues")
-def list_issues(unit_id: int, _: str = Depends(get_operator)):
-    return get_project().list_issues(unit_id)
-
-
-@app.post("/api/units/{unit_id}/issues")
-def add_issue(unit_id: int, req: IssueReq, operator: str = Depends(get_operator)):
-    try:
-        iid = get_project().add_issue(unit_id, operator, **req.model_dump())
-    except (KeyError, ValueError) as e:
-        raise HTTPException(status_code=404 if isinstance(e, KeyError) else 400, detail=str(e))
-    return {"id": iid}
-
-
-@app.put("/api/units/{unit_id}/issues/order")
-def reorder_issues(unit_id: int, req: OrderReq, operator: str = Depends(get_operator)):
-    """保存单位内底稿的完整拖放顺序；编号和版本链保持不变。"""
-    try:
-        changed = get_project().reorder_issues(unit_id, req.ids, operator)
-    except (KeyError, ValueError) as exc:
-        raise HTTPException(status_code=404 if isinstance(exc, KeyError) else 400, detail=str(exc)) from exc
-    return {"changed": changed}
-
-
-@app.get("/api/issues/tree")
-def issue_tree(_: str = Depends(get_operator)):
-    """V3 问题树：全项目底稿按单位分组，一次请求返回，避免前端 N+1 查询。"""
-    return get_project().list_issues_by_unit()
-
-
-@app.get("/api/issues/{issue_id}")
-def get_issue(issue_id: int, _: str = Depends(get_operator)):
-    iss = get_project().get_issue(issue_id)
-    if not iss:
-        raise HTTPException(status_code=404, detail="底稿不存在")
-    return iss
-
-
-@app.post("/api/issues/{issue_id}/duplicate")
-def duplicate_issue(issue_id: int, req: DuplicateIssueReq, operator: str = Depends(get_operator)):
-    """从当前正文快速新建草稿；不复制附件、版本、状态或交流记录。"""
-    try:
-        return get_project().duplicate_issue(issue_id, operator, req.unit_id)
-    except (KeyError, ValueError) as exc:
-        raise HTTPException(status_code=404 if isinstance(exc, KeyError) else 400, detail=str(exc)) from exc
-
-
-@app.get("/api/workpaper-templates")
-def list_workpaper_templates(_: str = Depends(get_operator)):
-    return get_project().list_workpaper_templates()
-
-
-@app.post("/api/workpaper-templates")
-def create_workpaper_template(req: WorkpaperTemplateCreateReq, operator: str = Depends(get_operator)):
-    try:
-        return get_project().create_workpaper_template(req.name, req.issue_id, operator)
-    except (KeyError, ValueError) as exc:
-        raise HTTPException(status_code=404 if isinstance(exc, KeyError) else 400, detail=str(exc)) from exc
-
-
-@app.post("/api/workpaper-templates/{template_id}/apply")
-def apply_workpaper_template(template_id: int, req: WorkpaperTemplateApplyReq, operator: str = Depends(get_operator)):
-    try:
-        return get_project().create_issue_from_template(template_id, req.unit_id, operator)
-    except (KeyError, ValueError) as exc:
-        raise HTTPException(status_code=404 if isinstance(exc, KeyError) else 400, detail=str(exc)) from exc
-
-
-@app.delete("/api/workpaper-templates/{template_id}")
-def delete_workpaper_template(template_id: int, operator: str = Depends(get_operator)):
-    try:
-        get_project().delete_workpaper_template(template_id, operator)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"ok": True}
-
-
-@app.patch("/api/issues/{issue_id}")
-def update_issue(issue_id: int, req: IssueReq, operator: str = Depends(get_operator)):
-    try:
-        # 只更新显式提交的字段：未提交字段不写入（审查 F-02 修复）
-        changed = get_project().update_issue(issue_id, operator,
-                                             **req.model_dump(exclude_unset=True))
-    except (KeyError, ValueError) as e:
-        status_code = 404 if isinstance(e, KeyError) else 400
-        raise HTTPException(status_code=status_code, detail=str(e))
-    return {"changed": changed, "issue": get_project().get_issue(issue_id)}
-
-
-@app.post("/api/issues/batch-metadata/preflight")
-def batch_issue_metadata_preflight(req: BatchIssueMetadataReq, _: str = Depends(get_operator)):
-    """批量元数据只读预检：明确影响范围后生成一次性确认令牌。"""
-    try:
-        result = get_project().preflight_batch_issue_metadata(req.issue_ids, req.changes)
-    except (KeyError, ValueError) as exc:
-        raise HTTPException(status_code=404 if isinstance(exc, KeyError) else 400, detail=str(exc)) from exc
-    ctx = _ctx_var.get()
-    assert ctx is not None
-    token = uuid.uuid4().hex
-    ctx.batch_issue_preflights[token] = {
-        "project_uuid": get_project().project_uuid,
-        "issue_ids": result["issue_ids"], "changes": result["changes"],
-        "fingerprint": result.pop("fingerprint"), "expires_at": time.monotonic() + 10 * 60,
-    }
-    result["confirmation_token"] = token
-    return result
-
-
-@app.post("/api/issues/batch-metadata")
-def batch_issue_metadata_update(req: BatchIssueMetadataReq, operator: str = Depends(get_operator)):
-    """令牌、项目和底稿快照一致时，事务内批量维护白名单元数据。"""
-    ctx = _ctx_var.get()
-    assert ctx is not None
-    approved = ctx.batch_issue_preflights.pop(req.confirmation_token.strip(), None)
-    if not approved or approved["expires_at"] < time.monotonic():
-        raise HTTPException(status_code=409, detail="批量维护预检已失效，请重新预检")
-    proj = get_project()
-    if approved["project_uuid"] != proj.project_uuid or approved["issue_ids"] != req.issue_ids or approved["changes"] != req.changes:
-        raise HTTPException(status_code=409, detail="批量维护内容已变化，请重新预检")
-    try:
-        current = proj.preflight_batch_issue_metadata(req.issue_ids, req.changes)
-        if current["fingerprint"] != approved["fingerprint"]:
-            raise HTTPException(status_code=409, detail="所选底稿已变化，请重新预检后再提交")
-        return proj.batch_update_issue_metadata(req.issue_ids, req.changes, operator)
-    except (KeyError, ValueError) as exc:
-        raise HTTPException(status_code=404 if isinstance(exc, KeyError) else 400, detail=str(exc)) from exc
-
-
-@app.post("/api/issues/{issue_id}/status")
-def change_issue_status(issue_id: int, req: StatusReq, operator: str = Depends(get_operator)):
-    """状态流转（T3）：矩阵校验 + 必填规则 + 留痕。非法迁移 400 且提示可走路径。"""
-    try:
-        get_project().change_status(issue_id, req.status, operator, req.comment)
-    except (KeyError, ValueError) as e:
-        status_code = 404 if isinstance(e, KeyError) else 400
-        raise HTTPException(status_code=status_code, detail=str(e))
-    return get_project().get_issue(issue_id)
-
-
-# ───────────────────────── 问题交流（P1-14） ─────────────────────────
-
-@app.post("/api/issues/{issue_id}/exchange")
-def start_issue_exchange(issue_id: int, operator: str = Depends(get_operator)):
-    """开始交流修订；正式底稿在此期间保持只读。"""
-    try:
-        return get_project().start_exchange_session(issue_id, operator)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-
-
-@app.get("/api/exchanges/{session_uuid}")
-def get_issue_exchange(session_uuid: str, _: str = Depends(get_operator)):
-    try:
-        return get_project().get_exchange_session(session_uuid)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-
-
-@app.post("/api/exchanges/{session_uuid}/revisions")
-def propose_exchange_revision(session_uuid: str, req: ExchangeRevisionReq,
-                              operator: str = Depends(get_operator)):
-    try:
-        return get_project().propose_exchange_revision(
-            session_uuid, req.field_name, req.new_value, req.reason, operator,
-        )
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@app.post("/api/exchanges/{session_uuid}/revisions/{revision_uuid}/decision")
-def decide_exchange_revision(session_uuid: str, revision_uuid: str,
-                             req: ExchangeRevisionDecisionReq, operator: str = Depends(get_operator)):
-    try:
-        return get_project().decide_exchange_revision(session_uuid, revision_uuid, req.decision, operator)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@app.post("/api/exchanges/{session_uuid}/comments")
-def add_exchange_comment(session_uuid: str, req: ExchangeCommentReq,
-                         operator: str = Depends(get_operator)):
-    try:
-        return get_project().add_exchange_comment(
-            session_uuid, req.body, req.anchor_field, req.revision_uuid, operator,
-        )
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@app.post("/api/exchanges/{session_uuid}/requests")
-def create_exchange_request(session_uuid: str, req: ExchangeRequestReq,
-                            operator: str = Depends(get_operator)):
-    try:
-        return get_project().create_exchange_request(session_uuid, req.content, operator)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@app.patch("/api/exchanges/{session_uuid}/requests/{request_uuid}")
-def update_exchange_request(session_uuid: str, request_uuid: str, req: ExchangeRequestUpdateReq,
-                            operator: str = Depends(get_operator)):
-    try:
-        return get_project().update_exchange_request(
-            session_uuid, request_uuid, req.status, req.provided_file_id, req.note, operator,
-        )
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@app.post("/api/exchanges/{session_uuid}/apply")
-def apply_exchange_revisions(session_uuid: str, operator: str = Depends(get_operator)):
-    try:
-        return get_project().apply_exchange_revisions(session_uuid, operator)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@app.post("/api/exchanges/{session_uuid}/close")
-def close_issue_exchange(session_uuid: str, req: ExchangeCloseReq,
-                         operator: str = Depends(get_operator)):
-    try:
-        return get_project().close_exchange_session(session_uuid, req.note, operator)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@app.delete("/api/issues/{issue_id}")
-def delete_issue(issue_id: int, operator: str = Depends(get_operator)):
-    try:
-        proj = get_project()
-        _require_project_idle(proj)
-        proj.delete_issue(issue_id, operator)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    return {"ok": True}
-
-
-@app.get("/api/recycle/issues")
-def list_recycled_issues(_: str = Depends(get_operator)):
-    """底稿回收站：默认永不自动清空。"""
-    return get_project().list_recycled_issues()
-
-
-@app.get("/api/recycle/issues/{recycle_id}")
-def get_recycled_issue_detail(recycle_id: int, _: str = Depends(get_operator)):
-    """只读查看已移入回收站的底稿，便于确认后恢复或物理删除。"""
-    try:
-        return get_project().get_recycled_issue_detail(recycle_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-
-@app.post("/api/recycle/issues/{recycle_id}/restore")
-def restore_recycled_issue(recycle_id: int, operator: str = Depends(get_operator)):
-    try:
-        proj = get_project()
-        _require_project_idle(proj)
-        return proj.restore_recycled_issue(recycle_id, operator)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.delete("/api/recycle/issues/{recycle_id}")
-def purge_recycled_issue(recycle_id: int, operator: str = Depends(get_operator)):
-    """物理清空单条底稿，仅用户在回收站内明确操作时调用。"""
-    try:
-        proj = get_project()
-        _require_project_idle(proj)
-        proj.purge_recycled_issue(recycle_id, operator)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    return {"ok": True}
-
-
-@app.get("/api/recycle/units")
-def list_recycled_units(_: str = Depends(get_operator)):
-    return get_project().list_recycled_units()
-
-
-@app.post("/api/recycle/units/{recycle_id}/restore")
-def restore_recycled_unit(recycle_id: int, operator: str = Depends(get_operator)):
-    try:
-        proj = get_project()
-        _require_project_idle(proj)
-        return proj.restore_recycled_unit(recycle_id, operator)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.delete("/api/recycle/units/{recycle_id}")
-def purge_recycled_unit(recycle_id: int, operator: str = Depends(get_operator)):
-    try:
-        proj = get_project()
-        _require_project_idle(proj)
-        proj.purge_recycled_unit(recycle_id, operator)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"ok": True}
-
-
-@app.get("/api/recycle/files")
-def list_recycled_files(_: str = Depends(get_operator)):
-    return get_project().list_recycled_files()
-
-
-@app.post("/api/recycle/files/{recycle_id}/restore")
-def restore_recycled_file(recycle_id: int, operator: str = Depends(get_operator)):
-    try:
-        proj = get_project()
-        _require_project_idle(proj)
-        return proj.restore_recycled_file(recycle_id, operator)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.delete("/api/recycle/files/{recycle_id}")
-def purge_recycled_file(recycle_id: int, operator: str = Depends(get_operator)):
-    try:
-        proj = get_project()
-        _require_project_idle(proj)
-        proj.purge_recycled_file(recycle_id, operator)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"ok": True}
-
-
-# ───────────────────────── 版本历史 ─────────────────────────
-
-@app.get("/api/issues/{issue_id}/versions")
-def list_versions(issue_id: int, _: str = Depends(get_operator)):
-    if not get_project().get_issue(issue_id):
-        raise HTTPException(status_code=404, detail="底稿不存在或已移入回收站")
-    return get_project().list_versions(issue_id)
-
-
-@app.post("/api/issues/{issue_id}/versions/{version_id}/restore")
-def restore_version(issue_id: int, version_id: int, operator: str = Depends(get_operator)):
-    try:
-        get_project().restore_version(issue_id, version_id, operator)
-    except (KeyError, ValueError) as e:
-        raise HTTPException(status_code=404 if isinstance(e, KeyError) else 400, detail=str(e))
-    return {"ok": True}
+app.include_router(build_issues_router(get_project, get_operator, get_current_context))
+app.include_router(build_exchanges_router(get_project, get_operator))
+app.include_router(build_recycle_router(get_project, get_operator, _require_project_idle))
 
 
 # ───────────────────────── 附件 ─────────────────────────
