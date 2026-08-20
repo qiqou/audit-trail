@@ -150,6 +150,11 @@
       "table": "files"
     },
     {
+      "name": "idx_issue_drafts_saved",
+      "sql": "CREATE INDEX idx_issue_drafts_saved ON issue_drafts(saved_at DESC)",
+      "table": "issue_drafts"
+    },
+    {
       "name": "idx_issue_files_file",
       "sql": "CREATE INDEX idx_issue_files_file ON issue_files(file_id)",
       "table": "issue_files"
@@ -220,6 +225,16 @@
       "table": "recycle_bin"
     },
     {
+      "name": "idx_review_note_events_issue",
+      "sql": "CREATE INDEX idx_review_note_events_issue ON review_note_events(issue_id, event_seq)",
+      "table": "review_note_events"
+    },
+    {
+      "name": "idx_review_note_events_note",
+      "sql": "CREATE INDEX idx_review_note_events_note ON review_note_events(note_uuid, event_seq)",
+      "table": "review_note_events"
+    },
+    {
       "name": "idx_units_active",
       "sql": "CREATE INDEX idx_units_active ON units(deleted_at, sort_order, id)",
       "table": "units"
@@ -251,7 +266,7 @@
     "输出",
     "附件库"
   ],
-  "schema_version": 17,
+  "schema_version": 18,
   "tables": {
     "audit_log": {
       "columns": [
@@ -919,6 +934,68 @@
           "on_delete": "RESTRICT",
           "on_update": "NO ACTION",
           "table": "units",
+          "to": "id"
+        }
+      ]
+    },
+    "issue_drafts": {
+      "columns": [
+        {
+          "default": null,
+          "name": "issue_id",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "issue_uuid",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "0",
+          "name": "base_version_id",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "base_updated_at",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "payload",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "saved_by",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "saved_at",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "issue_id",
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "table": "issues",
           "to": "id"
         }
       ]
@@ -1623,6 +1700,96 @@
         }
       ],
       "foreign_keys": []
+    },
+    "review_note_events": {
+      "columns": [
+        {
+          "default": null,
+          "name": "event_uuid",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "note_uuid",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "issue_id",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "issue_uuid",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "0",
+          "name": "base_version_id",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": "''",
+          "name": "anchor_field",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "event_seq",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "event_type",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "body",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_by",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "issue_id",
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "table": "issues",
+          "to": "id"
+        }
+      ]
     },
     "schema_migrations": {
       "columns": [

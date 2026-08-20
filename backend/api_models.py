@@ -109,6 +109,24 @@ class IssueReq(BaseModel):
     status: str | None = None
 
 
+class IssueDraftReq(BaseModel):
+    """独立草稿保存请求；基线必须来自当前正式底稿读取结果。"""
+
+    payload: IssueReq
+    base_version_id: int = 0
+    base_updated_at: str
+
+
+class ReviewNoteCreateReq(BaseModel):
+    body: str
+    anchor_field: str = ""
+    base_version_id: int = 0
+
+
+class ReviewNoteEventReq(BaseModel):
+    body: str = ""
+
+
 class DuplicateIssueReq(BaseModel):
     """复制到同单位或指定单位；附件、版本和状态不参与复制。"""
 

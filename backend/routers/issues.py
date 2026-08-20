@@ -9,14 +9,18 @@ from api.errors import key_or_value_error
 from api_models import (
     BatchIssueMetadataReq,
     DuplicateIssueReq,
+    IssueDraftReq,
     IssueReq,
     OrderReq,
+    ReviewNoteCreateReq,
+    ReviewNoteEventReq,
     StatusReq,
     WorkpaperTemplateApplyReq,
     WorkpaperTemplateCreateReq,
 )
 from database import AuditProject
 from fastapi import APIRouter, Depends, HTTPException
+from services.issue_recovery import IssueRecoveryService
 
 
 def build_router(
@@ -26,6 +30,9 @@ def build_router(
 ) -> APIRouter:
     """保持 v1.2 URL、请求体、状态码与底稿版本语义不变。"""
     router = APIRouter()
+
+    def recovery_service() -> IssueRecoveryService:
+        return IssueRecoveryService(get_project())
 
     @router.get("/api/units/{unit_id}/issues")
     def list_issues(unit_id: int, _: str = Depends(get_operator)):
@@ -59,6 +66,78 @@ def build_router(
         if not issue:
             raise HTTPException(status_code=404, detail="底稿不存在")
         return issue
+
+    @router.get("/api/issues/{issue_id}/draft")
+    def get_issue_draft(issue_id: int, _: str = Depends(get_operator)):
+        """读取异常恢复草稿；草稿与正式版本基线不一致时只标记冲突，不自动覆盖。"""
+        try:
+            return recovery_service().draft_state(issue_id)
+        except (KeyError, ValueError) as exc:
+            raise key_or_value_error(exc) from exc
+
+    @router.put("/api/issues/{issue_id}/draft")
+    def save_issue_draft(issue_id: int, req: IssueDraftReq, operator: str = Depends(get_operator)):
+        """保存独立草稿，不创建正式版本、不改变正式底稿或状态。"""
+        try:
+            return recovery_service().save_draft(
+                issue_id,
+                req.payload.model_dump(exclude_unset=True),
+                req.base_version_id,
+                req.base_updated_at,
+                operator,
+            )
+        except (KeyError, ValueError) as exc:
+            raise key_or_value_error(exc) from exc
+
+    @router.delete("/api/issues/{issue_id}/draft")
+    def discard_issue_draft(issue_id: int, _: str = Depends(get_operator)):
+        """放弃异常恢复草稿；不会改写正式底稿、版本、状态或审计日志。"""
+        try:
+            return {"discarded": recovery_service().discard_draft(issue_id)}
+        except (KeyError, ValueError) as exc:
+            raise key_or_value_error(exc) from exc
+
+    @router.get("/api/issues/{issue_id}/review-notes")
+    def list_review_notes(issue_id: int, _: str = Depends(get_operator)):
+        """读取内部复核意见及其不可变事件；意见始终锚定创建时的正式版本。"""
+        try:
+            return recovery_service().review_notes(issue_id)
+        except (KeyError, ValueError) as exc:
+            raise key_or_value_error(exc) from exc
+
+    @router.post("/api/issues/{issue_id}/review-notes")
+    def create_review_note(issue_id: int, req: ReviewNoteCreateReq, operator: str = Depends(get_operator)):
+        """提出内部复核意见；不改写正式底稿、状态或交流记录。"""
+        try:
+            return recovery_service().create_review_note(
+                issue_id, req.body, req.anchor_field, req.base_version_id, operator,
+            )
+        except (KeyError, ValueError) as exc:
+            raise key_or_value_error(exc) from exc
+
+    @router.post("/api/review-notes/{note_uuid}/reply")
+    def reply_review_note(note_uuid: str, req: ReviewNoteEventReq, operator: str = Depends(get_operator)):
+        """回复开放中的内部复核意见，保留原意见和全部历史回复。"""
+        try:
+            return recovery_service().append_review_note_event(note_uuid, "replied", req.body, operator)
+        except (KeyError, ValueError) as exc:
+            raise key_or_value_error(exc) from exc
+
+    @router.post("/api/review-notes/{note_uuid}/resolve")
+    def resolve_review_note(note_uuid: str, req: ReviewNoteEventReq, operator: str = Depends(get_operator)):
+        """清除开放中的内部复核意见；动作追加为事件而非覆盖原意见。"""
+        try:
+            return recovery_service().append_review_note_event(note_uuid, "resolved", req.body, operator)
+        except (KeyError, ValueError) as exc:
+            raise key_or_value_error(exc) from exc
+
+    @router.post("/api/review-notes/{note_uuid}/reopen")
+    def reopen_review_note(note_uuid: str, req: ReviewNoteEventReq, operator: str = Depends(get_operator)):
+        """重新打开已清除的内部复核意见；保留完整事件链。"""
+        try:
+            return recovery_service().append_review_note_event(note_uuid, "reopened", req.body, operator)
+        except (KeyError, ValueError) as exc:
+            raise key_or_value_error(exc) from exc
 
     @router.post("/api/issues/{issue_id}/duplicate")
     def duplicate_issue(issue_id: int, req: DuplicateIssueReq, operator: str = Depends(get_operator)):

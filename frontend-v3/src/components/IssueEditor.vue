@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 
 import { api, type Issue, type IssueChanges, type IssuePatch, type IssueStatus, type Unit } from "../api/client";
 import { formatIssueNo } from "../format";
+import ReviewNotes from "./ReviewNotes.vue";
 import VersionHistory from "./VersionHistory.vue";
 
 type AutoSaveMode = "realtime" | "5m" | "20m";
@@ -35,8 +36,12 @@ const draft = reactive<PlainIssueDraft>({
   department: "", category: "", defect_type: "", defect_desc: "", amount: "", currency: "CNY", amount_unit: "元", regulation_basis: "", suggestion: "", author: "", reviewer: "",
 });
 const savedSignature = ref("");
+const recoveryBaseline = ref<{ versionId: number; updatedAt: string } | null>(null);
+const recoverySaving = ref(false);
 let syncingDraft = false;
 let saveTimer: ReturnType<typeof window.setTimeout> | undefined;
+let recoveryTimer: ReturnType<typeof window.setTimeout> | undefined;
+let recoveryLoadSequence = 0;
 
 const transitions: Record<IssueStatus, IssueStatus[]> = {
   "草稿": ["编制完成"],
@@ -99,8 +104,14 @@ function clearScheduledSave(): void {
   saveTimer = undefined;
 }
 
+function clearScheduledRecoverySave(): void {
+  window.clearTimeout(recoveryTimer);
+  recoveryTimer = undefined;
+}
+
 function syncDraft(issue: Issue): void {
   clearScheduledSave();
+  clearScheduledRecoverySave();
   syncingDraft = true;
   Object.assign(draft, {
     department: issue.department ?? "", category: issue.category ?? "", defect_type: issue.defect_type ?? "", defect_desc: issue.defect_desc ?? "",
@@ -111,12 +122,97 @@ function syncDraft(issue: Issue): void {
   syncingDraft = false;
 }
 
-watch(() => props.issue, syncDraft, { immediate: true });
+async function refreshRecoveryBaseline(issueId = props.issue.id): Promise<void> {
+  const state = await api.issueDraft(issueId);
+  if (issueId !== props.issue.id) return;
+  recoveryBaseline.value = {
+    versionId: state.current_version_id,
+    updatedAt: state.current_updated_at,
+  };
+}
+
+async function loadRecoveryDraft(issue: Issue): Promise<void> {
+  const sequence = ++recoveryLoadSequence;
+  try {
+    const state = await api.issueDraft(issue.id);
+    if (sequence !== recoveryLoadSequence || issue.id !== props.issue.id) return;
+    recoveryBaseline.value = {
+      versionId: state.current_version_id,
+      updatedAt: state.current_updated_at,
+    };
+    if (!state.draft) return;
+    if (state.draft.conflicted) {
+      try {
+        await ElMessageBox.confirm(
+          "检测到一份基于旧正式版本的异常恢复草稿。为避免覆盖正式底稿，系统不会自动恢复；可保留草稿待核对，或立即放弃。",
+          "草稿基线已变化",
+          { type: "warning", confirmButtonText: "放弃草稿", cancelButtonText: "保留草稿", distinguishCancelAndClose: true },
+        );
+        await api.discardIssueDraft(issue.id);
+        ElMessage.info("已放弃过期草稿，正式底稿未受影响");
+      } catch (error) {
+        if (error !== "cancel" && error !== "close") ElMessage.error(errorMessage(error));
+      }
+      return;
+    }
+    try {
+      await ElMessageBox.confirm(
+        `检测到 ${state.draft.saved_at} 保存的异常恢复草稿，恢复不会立即写入正式版本。`,
+        "恢复未提交草稿",
+        { type: "info", confirmButtonText: "恢复草稿", cancelButtonText: "放弃草稿", distinguishCancelAndClose: true },
+      );
+      syncingDraft = true;
+      Object.assign(draft, state.draft.payload);
+      syncingDraft = false;
+      ElMessage.success("草稿已恢复，请核对后手工保存为正式版本");
+    } catch (error) {
+      if (error === "cancel") {
+        await api.discardIssueDraft(issue.id);
+        ElMessage.info("已放弃恢复草稿，正式底稿未受影响");
+      } else if (error !== "close") {
+        ElMessage.error(errorMessage(error));
+      }
+    }
+  } catch (error) {
+    if (sequence === recoveryLoadSequence) ElMessage.error(errorMessage(error));
+  }
+}
+
+function scheduleRecoverySave(): void {
+  clearScheduledRecoverySave();
+  if (!recoveryBaseline.value || !dirty.value || isArchived.value) return;
+  recoveryTimer = window.setTimeout(() => { void persistRecoveryDraft(); }, 600);
+}
+
+async function persistRecoveryDraft(): Promise<void> {
+  clearScheduledRecoverySave();
+  if (!recoveryBaseline.value || !dirty.value || isArchived.value || recoverySaving.value) return;
+  recoverySaving.value = true;
+  try {
+    const state = await api.saveIssueDraft(
+      props.issue.id, draftValues(), recoveryBaseline.value.versionId, recoveryBaseline.value.updatedAt,
+    );
+    recoveryBaseline.value = { versionId: state.current_version_id, updatedAt: state.current_updated_at };
+  } catch (error) {
+    ElMessage.warning(errorMessage(error));
+  } finally {
+    recoverySaving.value = false;
+  }
+}
+
+watch(() => props.issue, (issue) => {
+  syncDraft(issue);
+  void loadRecoveryDraft(issue);
+}, { immediate: true });
 watch(draft, () => {
-  if (!syncingDraft && !saving.value && !isArchived.value && dirty.value) scheduleAutoSave();
+  if (!syncingDraft && !isArchived.value && dirty.value) {
+    scheduleRecoverySave();
+    if (!saving.value) scheduleAutoSave();
+  }
 }, { deep: true, flush: "sync" });
 watch(() => props.autoSaveMode, () => {
   clearScheduledSave();
+  clearScheduledRecoverySave();
   if (dirty.value && !isArchived.value) scheduleAutoSave();
 });
 
@@ -164,6 +260,12 @@ async function persist(showMessage: boolean): Promise<boolean> {
     // 请求期间若继续输入，不用旧响应刷新父组件，否则 props watcher 会把新输入覆盖掉。
     // 下一轮自动保存完成后再同步最新服务端结果。
     if (!changedWhileSaving) emit("updated", result.issue);
+    try {
+      await refreshRecoveryBaseline();
+      if (!changedWhileSaving) await api.discardIssueDraft(props.issue.id);
+    } catch {
+      // 正式保存已成功；恢复草稿清理失败只会留下可再次选择的独立草稿，不能影响正文。
+    }
     if (showMessage) ElMessage.success(result.changed ? "已保存并留存版本" : "内容没有变化");
     return true;
   } catch (error) {
@@ -172,7 +274,10 @@ async function persist(showMessage: boolean): Promise<boolean> {
   } finally {
     saving.value = false;
     // 保存期间继续输入时，保持脏状态并重新安排一次保存，不能悄然覆盖新输入。
-    if (dirty.value && !isArchived.value) scheduleAutoSave();
+    if (dirty.value && !isArchived.value) {
+      scheduleRecoverySave();
+      scheduleAutoSave();
+    }
   }
 }
 
@@ -316,7 +421,10 @@ async function transition(target: IssueStatus): Promise<void> {
   }
 }
 
-onBeforeUnmount(clearScheduledSave);
+onBeforeUnmount(() => {
+  clearScheduledSave();
+  clearScheduledRecoverySave();
+});
 // beforeunload 不能等待确认弹窗，向工作区暴露同步脏状态，由浏览器显示原生离开提示。
 function hasUnsavedChanges(): boolean {
   return dirty.value || (props.isNew && missingRequired.value.length > 0);
@@ -355,6 +463,7 @@ defineExpose({ confirmLeave, hasUnsavedChanges, openDuplicateDialog, openVersion
       <span :class="{ 'editor-dirty': dirty }">{{ saveStateText }}</span>
       <div class="editor-footer-actions"><VersionHistory ref="versionHistory" :issue="issue" :before-restore="prepareVersionRestore" :trigger-visible="false" @restored="(fresh) => emit('updated', fresh)" /><span class="status-actions footer-status-actions"><el-button v-for="target in allowed" :key="target" size="small" :loading="saving" :type="target === '已归档' ? 'info' : target === '已复核' ? 'success' : target === '复核退回' ? 'warning' : 'primary'" @click="transition(target)">{{ issue.status === '已归档' && target === '编制完成' ? '归档后编辑' : target }}</el-button></span><el-button size="small" type="primary" :disabled="isArchived" :loading="saving" @click="save">保存</el-button></div>
     </div>
+    <ReviewNotes :issue="issue" />
     <el-dialog v-model="duplicateVisible" title="复制为新底稿" width="min(480px, calc(100vw - 32px))" append-to-body>
       <div class="duplicate-panel">
         <p>将复制当前底稿的正文和元数据为新草稿。可选择任意被审计单位；附件、版本、状态和交流记录不会复制。</p>

@@ -25,6 +25,25 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath
 from typing import ClassVar
 
+from domain.errors import ConflictError
+from domain.issue_workflow import (
+    ISSUE_STATUSES,
+    STATUS_ARCHIVED,
+    STATUS_DRAFT,
+    STATUS_FLOW,
+    STATUS_REJECTED,
+    STATUS_REVIEWED,
+    STATUS_SUBMITTED,
+    validate_status_transition,
+)
+from domain.review_workflow import (
+    EVENT_CREATED,
+    EVENT_REOPENED,
+    EVENT_REPLIED,
+    EVENT_RESOLVED,
+    note_state,
+    validate_review_event,
+)
 from rich_text import rich_html_to_plain_text, sanitize_rich_html
 
 DB_FILE = "audit.db"
@@ -49,8 +68,9 @@ SNAPSHOT_DIR = "快照"
 # - v15 为三个长文本字段增加受控富文本存储；纯文本投影继续用于检索、导出和交流
 # - v16 增加项目级资料请求台账；请求可关联单位、底稿和已提供附件
 # - v17 增加项目内底稿模板；模板只复用正文元数据，不承载人员、状态、证据或历史
+# - v18 增加独立底稿草稿层；草稿不生成正式版本、不改变正式正文，且绑定基线时间
 # - 打开时若项目 schema_version > 当前 → 拒绝（项目由更新版本创建，需升级程序）
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 SCHEMA_VERSION_KEY = "schema_version"
 PROJECT_UUID_KEY = "project_uuid"
 DEFAULT_BACKUP_INTERVAL_MINUTES = 6 * 60
@@ -333,6 +353,38 @@ class AuditProject:
                 );
                 CREATE INDEX IF NOT EXISTS idx_workpaper_templates_updated ON workpaper_templates(updated_at DESC, id DESC);
 
+                -- 草稿仅用于异常恢复和跨会话续写，不能混入正式 issues 或版本历史。
+                -- base_updated_at 是正式底稿基线；基线变化时恢复必须显式确认，不能静默覆盖。
+                CREATE TABLE IF NOT EXISTS issue_drafts(
+                    issue_id        INTEGER PRIMARY KEY REFERENCES issues(id) ON DELETE CASCADE,
+                    issue_uuid      TEXT NOT NULL,
+                    base_version_id INTEGER NOT NULL DEFAULT 0,
+                    base_updated_at TEXT NOT NULL,
+                    payload         TEXT NOT NULL,
+                    saved_by        TEXT NOT NULL,
+                    saved_at        TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_issue_drafts_saved ON issue_drafts(saved_at DESC);
+
+                -- 复核意见以不可变事件保存：提出、回复、清除和重开均追加新行，
+                -- 不覆盖原意见，且所有事件固定锚定创建时的正式版本。
+                CREATE TABLE IF NOT EXISTS review_note_events(
+                    event_uuid      TEXT PRIMARY KEY,
+                    note_uuid       TEXT NOT NULL,
+                    issue_id        INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+                    issue_uuid      TEXT NOT NULL,
+                    base_version_id INTEGER NOT NULL DEFAULT 0,
+                    anchor_field    TEXT NOT NULL DEFAULT '',
+                    event_seq       INTEGER NOT NULL,
+                    event_type      TEXT NOT NULL,
+                    body            TEXT NOT NULL DEFAULT '',
+                    created_by      TEXT NOT NULL,
+                    created_at      TEXT NOT NULL,
+                    CHECK (event_type IN ('created', 'replied', 'resolved', 'reopened'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_review_note_events_note ON review_note_events(note_uuid, event_seq);
+                CREATE INDEX IF NOT EXISTS idx_review_note_events_issue ON review_note_events(issue_id, event_seq);
+
                 CREATE TABLE IF NOT EXISTS issue_versions(
                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
                     issue_id   INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
@@ -601,6 +653,16 @@ class AuditProject:
             })
             # I4：自动备份失败冷却——记录失败时间，持久故障下避免每次心跳重试
             self._ensure_columns("backup_settings", {"last_error_at": "TEXT DEFAULT ''"})
+            self._ensure_columns("review_note_events", {"event_seq": "INTEGER NOT NULL DEFAULT 0"})
+            for note in self._conn.execute(
+                "SELECT DISTINCT note_uuid FROM review_note_events WHERE event_seq=0"
+            ).fetchall():
+                for sequence, row in enumerate(self._conn.execute(
+                    "SELECT rowid FROM review_note_events WHERE note_uuid=? ORDER BY rowid", (note["note_uuid"],)
+                ).fetchall(), start=1):
+                    self._conn.execute(
+                        "UPDATE review_note_events SET event_seq=? WHERE rowid=?", (sequence, row["rowid"]),
+                    )
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_exchange_revisions_version ON exchange_revisions(version_id)")
             self._backfill_exchange_revision_versions()
             self._backfill_v4_identity_fields()
@@ -803,7 +865,7 @@ class AuditProject:
                 # ``*_v8_legacy``。一旦旧表删除，旧项目会因此无法打开。把所有依赖
                 # 表一起重建，且下面按列名复制，兼容早期候选版已有交流记录。
                 legacy_tables = (
-                    "project_requests", "exchange_comments", "exchange_requests", "exchange_revisions", "exchange_sessions",
+                    "review_note_events", "issue_drafts", "project_requests", "exchange_comments", "exchange_requests", "exchange_revisions", "exchange_sessions",
                     "issue_files", "issue_versions", "files", "issues", "units",
                 )
                 for table in legacy_tables:
@@ -834,6 +896,29 @@ class AuditProject:
                         issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
                         version_no INTEGER NOT NULL, snapshot TEXT NOT NULL, saved_by TEXT DEFAULT '',
                         created_at TEXT, UNIQUE(issue_id, version_no)
+                    );
+                    CREATE TABLE issue_drafts(
+                        issue_id INTEGER PRIMARY KEY REFERENCES issues(id) ON DELETE CASCADE,
+                        issue_uuid TEXT NOT NULL,
+                        base_version_id INTEGER NOT NULL DEFAULT 0,
+                        base_updated_at TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        saved_by TEXT NOT NULL,
+                        saved_at TEXT NOT NULL
+                    );
+                    CREATE TABLE review_note_events(
+                        event_uuid TEXT PRIMARY KEY,
+                        note_uuid TEXT NOT NULL,
+                        issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+                        issue_uuid TEXT NOT NULL,
+                        base_version_id INTEGER NOT NULL DEFAULT 0,
+                        anchor_field TEXT NOT NULL DEFAULT '',
+                        event_seq INTEGER NOT NULL,
+                        event_type TEXT NOT NULL,
+                        body TEXT NOT NULL DEFAULT '',
+                        created_by TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        CHECK (event_type IN ('created', 'replied', 'resolved', 'reopened'))
                     );
                     CREATE TABLE files(
                         id INTEGER PRIMARY KEY AUTOINCREMENT, file_uuid TEXT,
@@ -934,6 +1019,11 @@ class AuditProject:
                         "author, reviewer, status, deleted_at, deleted_by, created_at, updated_at"
                     ),
                     "issue_versions": "id, issue_id, version_no, snapshot, saved_by, created_at",
+                    "issue_drafts": "issue_id, issue_uuid, base_version_id, base_updated_at, payload, saved_by, saved_at",
+                    "review_note_events": (
+                        "event_uuid, note_uuid, issue_id, issue_uuid, base_version_id, anchor_field, event_seq, event_type, "
+                        "body, created_by, created_at"
+                    ),
                     "files": (
                         "id, file_uuid, unit_id, stored_name, orig_name, folder_path, rel_path, size, sha256, mime, "
                         "exclusive_to, deleted_at, deleted_by, created_at"
@@ -970,6 +1060,9 @@ class AuditProject:
                     CREATE INDEX idx_issues_unit ON issues(unit_id);
                     CREATE UNIQUE INDEX uq_issues_active_unit_seq ON issues(unit_id, seq) WHERE deleted_at IS NULL;
                     CREATE INDEX idx_versions_issue ON issue_versions(issue_id);
+                    CREATE INDEX idx_issue_drafts_saved ON issue_drafts(saved_at DESC);
+                    CREATE INDEX idx_review_note_events_note ON review_note_events(note_uuid, event_seq);
+                    CREATE INDEX idx_review_note_events_issue ON review_note_events(issue_id, event_seq);
                     CREATE INDEX idx_files_unit ON files(unit_id);
                     CREATE INDEX idx_issue_files_file ON issue_files(file_id);
                     CREATE INDEX idx_issues_active_unit ON issues(unit_id, deleted_at, seq);
@@ -1768,6 +1861,7 @@ class AuditProject:
                 ).fetchone()[0],
             }
             self._conn.execute("DELETE FROM issue_files")
+            self._conn.execute("DELETE FROM issue_drafts")
             self._conn.execute("DELETE FROM project_requests")
             self._conn.execute("DELETE FROM files")
             self._conn.execute("DELETE FROM issue_versions")
@@ -2271,6 +2365,202 @@ class AuditProject:
             )
             self._log_in_transaction(operator, "调整底稿排序", f"{unit['name']}：{len(ids)} 条底稿")
         return True
+
+    # ───────────────────────── 独立草稿层 ─────────────────────────
+
+    @staticmethod
+    def _draft_payload(payload: dict) -> dict[str, str | int | None]:
+        """限制草稿字段，绝不接受状态、编号、单位或附件归属的客户端覆盖。"""
+        allowed = set(ISSUE_FIELDS) - {"status"}
+        result: dict[str, str | int | None] = {}
+        for key, value in (payload or {}).items():
+            if key not in allowed or value is None:
+                continue
+            result[str(key)] = int(value) if key == "amount_minor" else str(value)
+        return result
+
+    def _issue_draft_baseline(self, issue_id: int) -> tuple[dict, int]:
+        issue = self.get_issue(issue_id)
+        if not issue:
+            raise KeyError(f"底稿不存在: {issue_id}")
+        version_id = int(self._conn.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM issue_versions WHERE issue_id=?", (issue_id,)
+        ).fetchone()[0])
+        return issue, version_id
+
+    def get_issue_draft(self, issue_id: int) -> dict | None:
+        """读取独立草稿及其与当前正式底稿基线是否一致的判断。"""
+        issue, current_version_id = self._issue_draft_baseline(issue_id)
+        row = self._conn.execute(
+            "SELECT * FROM issue_drafts WHERE issue_id=?", (issue_id,)
+        ).fetchone()
+        if not row:
+            return None
+        draft = dict(row)
+        try:
+            draft["payload"] = json.loads(draft["payload"] or "{}")
+        except json.JSONDecodeError:
+            # 保存表被人为损坏时绝不返回半解析内容覆盖用户的正式底稿。
+            raise ValueError("草稿内容损坏，未自动恢复；请从项目备份或正式版本处理") from None
+        draft["current_version_id"] = current_version_id
+        draft["current_updated_at"] = str(issue.get("updated_at") or "")
+        draft["conflicted"] = (
+            int(draft["base_version_id"] or 0) != current_version_id
+            or str(draft["base_updated_at"] or "") != str(issue.get("updated_at") or "")
+        )
+        return draft
+
+    def get_issue_draft_state(self, issue_id: int) -> dict:
+        """返回草稿（可为空）以及创建下一次草稿所需的正式基线。"""
+        issue, current_version_id = self._issue_draft_baseline(issue_id)
+        draft = self.get_issue_draft(issue_id)
+        return {
+            "draft": draft,
+            "current_version_id": current_version_id,
+            "current_updated_at": str(issue.get("updated_at") or ""),
+        }
+
+    def save_issue_draft(
+        self, issue_id: int, payload: dict, base_version_id: int, base_updated_at: str, operator: str,
+    ) -> dict:
+        """原子保存异常恢复草稿；正式底稿或版本绝不在这里写入。"""
+        issue, current_version_id = self._issue_draft_baseline(issue_id)
+        if int(base_version_id) != current_version_id or str(base_updated_at or "") != str(issue.get("updated_at") or ""):
+            raise ConflictError("正式底稿已更新，草稿未保存；请重新读取后决定恢复或放弃")
+        normalized = self._draft_payload(payload)
+        if not normalized:
+            raise ValueError("草稿至少应包含一个可编辑字段")
+        now = _now()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO issue_drafts(issue_id, issue_uuid, base_version_id, base_updated_at, payload, saved_by, saved_at)
+                VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(issue_id) DO UPDATE SET
+                    issue_uuid=excluded.issue_uuid,
+                    base_version_id=excluded.base_version_id,
+                    base_updated_at=excluded.base_updated_at,
+                    payload=excluded.payload,
+                    saved_by=excluded.saved_by,
+                    saved_at=excluded.saved_at
+                """,
+                (
+                    issue_id, str(issue.get("issue_uuid") or ""), current_version_id,
+                    str(issue.get("updated_at") or ""), json.dumps(normalized, ensure_ascii=False), operator, now,
+                ),
+            )
+        return self.get_issue_draft_state(issue_id)
+
+    def discard_issue_draft(self, issue_id: int) -> bool:
+        """仅删除独立草稿；不改正式正文、版本、状态或审计日志。"""
+        self._issue_draft_baseline(issue_id)
+        with self._lock, self._conn:
+            return self._conn.execute("DELETE FROM issue_drafts WHERE issue_id=?", (issue_id,)).rowcount > 0
+
+    # ───────────────────────── 内部复核意见（不可变事件） ─────────────────────────
+
+    def list_review_notes(self, issue_id: int) -> list[dict]:
+        """按意见聚合不可变事件，并显示其是否仍锚定当前正式版本。"""
+        issue, current_version_id = self._issue_draft_baseline(issue_id)
+        rows = self._conn.execute(
+            "SELECT * FROM review_note_events WHERE issue_id=? ORDER BY note_uuid, event_seq", (issue_id,)
+        ).fetchall()
+        notes: dict[str, dict] = {}
+        for row in rows:
+            event = dict(row)
+            note_uuid = str(event["note_uuid"])
+            note = notes.get(note_uuid)
+            if note is None:
+                note = {
+                    "note_uuid": note_uuid,
+                    "issue_id": issue_id,
+                    "issue_uuid": str(issue.get("issue_uuid") or ""),
+                    "base_version_id": int(event["base_version_id"] or 0),
+                    "anchor_field": str(event["anchor_field"] or ""),
+                    "created_by": str(event["created_by"]),
+                    "created_at": str(event["created_at"]),
+                    "body": str(event["body"]),
+                    "events": [],
+                }
+                notes[note_uuid] = note
+            note["events"].append(event)
+        result = list(notes.values())
+        for note in result:
+            note["status"] = note_state(event["event_type"] for event in note["events"])
+            note["is_stale"] = int(note["base_version_id"]) != current_version_id
+        return result
+
+    def _review_note_events(self, note_uuid: str) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM review_note_events WHERE note_uuid=? ORDER BY event_seq", (note_uuid,)
+        ).fetchall()
+        if not rows:
+            raise KeyError("复核意见不存在")
+        return [dict(row) for row in rows]
+
+    def create_review_note(
+        self, issue_id: int, body: str, anchor_field: str, base_version_id: int, operator: str,
+    ) -> dict:
+        """提出一条复核意见，必须锚定当前正式版本，避免误评旧正文。"""
+        issue, current_version_id = self._issue_draft_baseline(issue_id)
+        if int(base_version_id) != current_version_id:
+            raise ConflictError("正式底稿版本已变化，请刷新后再提出复核意见")
+        validate_review_event("open", EVENT_CREATED, body)
+        note_uuid, event_uuid, now = str(uuid.uuid4()), str(uuid.uuid4()), _now()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO review_note_events(
+                    event_uuid, note_uuid, issue_id, issue_uuid, base_version_id, anchor_field,
+                    event_seq, event_type, body, created_by, created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    event_uuid, note_uuid, issue_id, str(issue.get("issue_uuid") or ""), current_version_id,
+                    str(anchor_field or "").strip(), 1, EVENT_CREATED, str(body).strip(), operator, now,
+                ),
+            )
+            self._log_in_transaction(
+                operator, "提出复核意见", self._issue_target(issue["unit_id"], issue["seq"], issue),
+                f"意见：{note_uuid}；锚定版本：{current_version_id}", issue_uuid=str(issue.get("issue_uuid") or ""),
+            )
+        return next(note for note in self.list_review_notes(issue_id) if note["note_uuid"] == note_uuid)
+
+    def append_review_note_event(self, note_uuid: str, event_type: str, body: str, operator: str) -> dict:
+        """回复、清除或重开意见，只追加事件，不覆盖任何既有意见。"""
+        events = self._review_note_events(note_uuid)
+        first = events[0]
+        current_state = note_state(event["event_type"] for event in events)
+        validate_review_event(current_state, event_type, body)
+        issue, _current_version_id = self._issue_draft_baseline(int(first["issue_id"]))
+        event_uuid, now = str(uuid.uuid4()), _now()
+        with self._lock, self._conn:
+            event_seq = int(self._conn.execute(
+                "SELECT COALESCE(MAX(event_seq), 0) + 1 FROM review_note_events WHERE note_uuid=?", (note_uuid,)
+            ).fetchone()[0])
+            self._conn.execute(
+                """
+                INSERT INTO review_note_events(
+                    event_uuid, note_uuid, issue_id, issue_uuid, base_version_id, anchor_field,
+                    event_seq, event_type, body, created_by, created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    event_uuid, note_uuid, int(first["issue_id"]), str(first["issue_uuid"]),
+                    int(first["base_version_id"] or 0), str(first["anchor_field"] or ""),
+                    event_seq, event_type, str(body or "").strip(), operator, now,
+                ),
+            )
+            labels = {
+                EVENT_REPLIED: "回复复核意见",
+                EVENT_RESOLVED: "清除复核意见",
+                EVENT_REOPENED: "重开复核意见",
+            }
+            self._log_in_transaction(
+                operator, labels[event_type], self._issue_target(issue["unit_id"], issue["seq"], issue),
+                f"意见：{note_uuid}", issue_uuid=str(issue.get("issue_uuid") or ""),
+            )
+        return next(note for note in self.list_review_notes(int(first["issue_id"])) if note["note_uuid"] == note_uuid)
 
     @staticmethod
     def _has_meaningful_issue_content(data: dict) -> bool:
@@ -2888,29 +3178,15 @@ class AuditProject:
     # ───────────────────────── 状态机（T3） ─────────────────────────
 
     # 状态枚举（复用 issues.status 字段，零新增列；DESIGN.md 1.1）
-    STATUS_DRAFT = "草稿"
-    STATUS_SUBMITTED = "编制完成"
-    STATUS_REJECTED = "复核退回"
-    STATUS_REVIEWED = "已复核"
-    STATUS_ARCHIVED = "已归档"
-    STATUSES = (STATUS_DRAFT, STATUS_SUBMITTED, STATUS_REJECTED, STATUS_REVIEWED, STATUS_ARCHIVED)
+    STATUS_DRAFT = STATUS_DRAFT
+    STATUS_SUBMITTED = STATUS_SUBMITTED
+    STATUS_REJECTED = STATUS_REJECTED
+    STATUS_REVIEWED = STATUS_REVIEWED
+    STATUS_ARCHIVED = STATUS_ARCHIVED
+    STATUSES = ISSUE_STATUSES
 
     # 流转矩阵：{旧状态: {允许的新状态}}（DESIGN.md 1.2）
-    STATUS_FLOW: ClassVar[dict[str, set[str]]] = {
-        STATUS_DRAFT: {STATUS_SUBMITTED},
-        STATUS_SUBMITTED: {STATUS_REJECTED, STATUS_REVIEWED},
-        STATUS_REJECTED: {STATUS_SUBMITTED},
-        STATUS_REVIEWED: {STATUS_REJECTED, STATUS_ARCHIVED},
-        # 归档后编辑：唯一合法去向是回到编制完成重新复核（自动开新版本+原因）
-        STATUS_ARCHIVED: {STATUS_SUBMITTED},
-    }
-
-    # 非法迁移的"可以怎么走"提示（DESIGN.md 1.2：教用户怎么做）
-    _STATUS_HINTS: ClassVar[dict[tuple[str, str], str]] = {
-        (STATUS_ARCHIVED, STATUS_DRAFT): "已归档底稿如需修改，请使用『归档后编辑』（自动开新版本）",
-        (STATUS_ARCHIVED, STATUS_REJECTED): "已归档底稿不能退回，请使用『归档后编辑』后重新复核",
-        (STATUS_ARCHIVED, STATUS_REVIEWED): "已归档底稿已复核过，如需改动请使用『归档后编辑』",
-    }
+    STATUS_FLOW: ClassVar[dict[str, frozenset[str]]] = STATUS_FLOW
 
     def change_status(self, issue_id: int, new_status: str, operator: str, comment: str = "") -> dict:
         """状态流转（DESIGN.md 1.5）：校验矩阵 + 必填规则，留痕。
@@ -2924,37 +3200,11 @@ class AuditProject:
         issue = self.get_issue(issue_id)
         if not issue:
             raise KeyError(f"底稿不存在: {issue_id}")
-        old = issue.get("status") or self.STATUS_DRAFT
-        new = str(new_status or "").strip()
-        if new not in self.STATUSES:
-            raise ValueError(f"未知状态：{new_status}。可选：{'、'.join(self.STATUSES)}")
-        allowed = self.STATUS_FLOW.get(old, set())
-        if new not in allowed:
-            hint = self._STATUS_HINTS.get((old, new))
-            if not hint:
-                hint = f"不能从「{old}」变更为「{new}」。" + (
-                    f"可以流转到：{'、'.join(sorted(allowed))}。" if allowed else "该状态不可再流转。"
-                )
-            raise ValueError(hint)
-
-        # 必填校验（DESIGN.md 1.6，前端 + 后端双校验）
-        if new == self.STATUS_SUBMITTED and old in (self.STATUS_DRAFT, self.STATUS_REJECTED):
-            missing = [label for key, label in (
-                ("defect_desc", "发现描述"), ("department", "版块"), ("defect_type", "定性"),
-            ) if not str(issue.get(key) or "").strip()]
-            if missing:
-                raise ValueError(f"提交复核前请先填写：{'、'.join(missing)}")
-        if new == self.STATUS_REVIEWED and not str(issue.get("reviewer") or "").strip():
-            raise ValueError("复核通过前请填写审核人（reviewer）")
-        if new == self.STATUS_REJECTED and not str(comment or "").strip():
-            raise ValueError("复核退回请填写退回意见")
-        if old == self.STATUS_ARCHIVED and not str(comment or "").strip():
-            raise ValueError("归档后编辑请填写修改原因")
-
-        detail = f"{old} → {new}"
-        if str(comment or "").strip():
-            label = "退回意见" if new == self.STATUS_REJECTED else "修改原因"
-            detail += f"（{label}：{str(comment).strip()}）"
+        transition = validate_status_transition(
+            str(issue.get("status") or self.STATUS_DRAFT), new_status, issue, comment,
+        )
+        old = transition.old
+        new = transition.new
 
         now = _now()
         with self._lock, self._conn:
@@ -2976,7 +3226,7 @@ class AuditProject:
                 (new, now, issue_id),
             )
             self._log_in_transaction(
-                operator, "状态流转", self._issue_target(issue["unit_id"], issue["seq"], issue), detail,
+                operator, "状态流转", self._issue_target(issue["unit_id"], issue["seq"], issue), transition.detail,
                 issue_uuid=str(issue.get("issue_uuid") or ""),
             )
         return {"old": old, "new": new}

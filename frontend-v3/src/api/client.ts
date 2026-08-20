@@ -139,6 +139,55 @@ export interface Issue {
   file_count?: number;
 }
 
+export interface IssueDraft {
+  issue_id: number;
+  issue_uuid: string;
+  base_version_id: number;
+  base_updated_at: string;
+  payload: IssuePatch;
+  saved_by: string;
+  saved_at: string;
+  current_version_id: number;
+  current_updated_at: string;
+  conflicted: boolean;
+}
+
+export interface IssueDraftState {
+  draft: IssueDraft | null;
+  current_version_id: number;
+  current_updated_at: string;
+}
+
+export type ReviewNoteEventType = "created" | "replied" | "resolved" | "reopened";
+
+export interface ReviewNoteEvent {
+  event_uuid: string;
+  note_uuid: string;
+  issue_id: number;
+  issue_uuid: string;
+  base_version_id: number;
+  anchor_field: string;
+  event_seq: number;
+  event_type: ReviewNoteEventType;
+  body: string;
+  created_by: string;
+  created_at: string;
+}
+
+export interface ReviewNote {
+  note_uuid: string;
+  issue_id: number;
+  issue_uuid: string;
+  base_version_id: number;
+  anchor_field: string;
+  created_by: string;
+  created_at: string;
+  body: string;
+  status: "open" | "resolved";
+  is_stale: boolean;
+  events: ReviewNoteEvent[];
+}
+
 export interface WorkpaperTemplate {
   id: number;
   template_uuid: string;
@@ -761,6 +810,49 @@ class ApiClient {
 
   updateIssue(issueId: number, values: IssuePatch): Promise<{ changed: boolean; issue: Issue }> {
     return this.request(`/api/issues/${issueId}`, { method: "PATCH", body: JSON.stringify(values) });
+  }
+
+  issueDraft(issueId: number): Promise<IssueDraftState> {
+    return this.request(`/api/issues/${issueId}/draft`);
+  }
+
+  saveIssueDraft(
+    issueId: number, payload: IssuePatch, baseVersionId: number, baseUpdatedAt: string,
+  ): Promise<IssueDraftState> {
+    return this.request(`/api/issues/${issueId}/draft`, {
+      method: "PUT",
+      body: JSON.stringify({
+        payload,
+        base_version_id: baseVersionId,
+        base_updated_at: baseUpdatedAt,
+      }),
+    });
+  }
+
+  discardIssueDraft(issueId: number): Promise<{ discarded: boolean }> {
+    return this.request(`/api/issues/${issueId}/draft`, { method: "DELETE" });
+  }
+
+  reviewNotes(issueId: number): Promise<ReviewNote[]> {
+    return this.request(`/api/issues/${issueId}/review-notes`);
+  }
+
+  createReviewNote(
+    issueId: number, body: string, baseVersionId: number, anchorField = "",
+  ): Promise<ReviewNote> {
+    return this.request(`/api/issues/${issueId}/review-notes`, {
+      method: "POST",
+      body: JSON.stringify({ body, base_version_id: baseVersionId, anchor_field: anchorField }),
+    });
+  }
+
+  appendReviewNoteEvent(
+    noteUuid: string, eventType: Exclude<ReviewNoteEventType, "created">, body = "",
+  ): Promise<ReviewNote> {
+    return this.request(`/api/review-notes/${noteUuid}/${eventType === "replied" ? "reply" : eventType === "resolved" ? "resolve" : "reopen"}`, {
+      method: "POST",
+      body: JSON.stringify({ body }),
+    });
   }
 
   startExchange(issueId: number): Promise<ExchangeSession> {
