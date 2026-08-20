@@ -11,6 +11,7 @@ import { useSessionStore } from "./app/sessionStore";
 import { useProjectStore } from "./app/projectStore";
 import { useThemeStore, type Theme } from "./app/themeStore";
 import { createTabLease } from "./app/tabLease";
+import { useReferenceData } from "./features/projectContext/useReferenceData";
 import { APP_VERSION_LABEL } from "./version";
 
 // 项目列表/登录页不需要工作区和低频操作面板，打开项目时才加载，缩短首次启动等待。
@@ -151,6 +152,8 @@ function report(error: unknown): void {
   ElMessage.error(error instanceof Error ? error.message : "操作失败，请重试");
 }
 
+const { refreshUnits, refreshDepartments, refreshCategories, refreshIssueNumber, refreshAll: refreshProjectReferenceData } = useReferenceData(report);
+
 async function forgetRecent(path: string): Promise<void> {
   try {
     await api.forgetRecent(path);
@@ -288,7 +291,7 @@ async function setProject(action: "open" | "create"): Promise<void> {
     project.value = action === "open"
       ? await api.openProject(projectPath.value.trim())
       : await api.createProject(projectPath.value.trim(), projectName.value.trim());
-    await Promise.all([refreshUnits(), refreshDepartments(), refreshCategories(), refreshIssueNumber()]);
+    await refreshProjectReferenceData();
     await refreshRecent(); // 后端打开/创建时已自动记录
     health.value = null;
     ElMessage.success(action === "open" ? "项目已打开" : "项目已创建");
@@ -304,7 +307,7 @@ async function openRecent(recent: RecentProject): Promise<void> {
   opening.value = true;
   try {
     project.value = await api.openProject(recent.path);
-    await Promise.all([refreshUnits(), refreshDepartments(), refreshCategories(), refreshIssueNumber()]);
+    await refreshProjectReferenceData();
     await refreshRecent(); // 后端打开时已自动更新记录时间
     health.value = null;
     ElMessage.success(`已打开“${project.value.project_name}”`);
@@ -312,38 +315,6 @@ async function openRecent(recent: RecentProject): Promise<void> {
     report(error);
   } finally {
     opening.value = false;
-  }
-}
-
-async function refreshUnits(): Promise<void> {
-  try {
-    units.value = await api.units();
-  } catch (error) {
-    report(error);
-  }
-}
-
-async function refreshDepartments(): Promise<void> {
-  try {
-    departments.value = await api.departments();
-  } catch (error) {
-    report(error);
-  }
-}
-
-async function refreshCategories(): Promise<void> {
-  try {
-    categories.value = await api.categories();
-  } catch (error) {
-    report(error);
-  }
-}
-
-async function refreshIssueNumber(): Promise<void> {
-  try {
-    issueNumberRule.value = await api.issueNumber();
-  } catch (error) {
-    report(error);
   }
 }
 
@@ -377,7 +348,7 @@ async function openRestoredProject(path: string): Promise<boolean> {
   if (workspace.value && !(await workspace.value.confirmCurrentLeave())) return false;
   try {
     project.value = await api.openProject(path);
-    await Promise.all([refreshUnits(), refreshDepartments(), refreshCategories(), refreshIssueNumber()]);
+    await refreshProjectReferenceData();
     await refreshRecent(); // 后端打开时已自动记录
     health.value = null;
     return true;
