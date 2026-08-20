@@ -10,6 +10,7 @@ import { useRuntimeStore } from "./app/runtimeStore";
 import { useSessionStore } from "./app/sessionStore";
 import { useProjectStore } from "./app/projectStore";
 import { useThemeStore, type Theme } from "./app/themeStore";
+import { createTabLease } from "./app/tabLease";
 import { APP_VERSION_LABEL } from "./version";
 
 // 项目列表/登录页不需要工作区和低频操作面板，打开项目时才加载，缩短首次启动等待。
@@ -31,10 +32,10 @@ const AUTO_SAVE_KEY = "audit_auto_save_mode_v3";
 const TAB_LEASE_KEY = "audit_single_tab_lease_v1";
 const TAB_LEASE_MS = 30_000;
 const TAB_RENEW_MS = 10_000;
-type TabLease = { tabId: string; expiresAt: number };
 const tabId = typeof crypto.randomUUID === "function"
   ? crypto.randomUUID()
   : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const tabLease = createTabLease(localStorage, TAB_LEASE_KEY, tabId, TAB_LEASE_MS);
 
 function loadRecentLocal(): RecentProject[] {
   // localStorage 仅作降级兜底（后端不可用时的静态读取；正式记录走后端 /api/recent）
@@ -89,43 +90,21 @@ watch(project, (current) => {
   if (router.currentRoute.value.name !== destination) void router.replace({ name: destination });
 }, { immediate: true });
 
-function readTabLease(): TabLease | null {
-  try {
-    const value = JSON.parse(localStorage.getItem(TAB_LEASE_KEY) ?? "null") as Partial<TabLease> | null;
-    return value && typeof value.tabId === "string" && typeof value.expiresAt === "number"
-      ? { tabId: value.tabId, expiresAt: value.expiresAt }
-      : null;
-  } catch {
-    return null;
-  }
-}
-
 function claimTabLease(): boolean {
-  const existing = readTabLease();
-  if (existing && existing.tabId !== tabId && existing.expiresAt > Date.now()) {
-    tabBlocked.value = true;
-    return false;
-  }
-  const mine: TabLease = { tabId, expiresAt: Date.now() + TAB_LEASE_MS };
-  localStorage.setItem(TAB_LEASE_KEY, JSON.stringify(mine));
-  const verified = readTabLease();
-  tabBlocked.value = verified?.tabId !== tabId;
+  tabBlocked.value = !tabLease.claim();
   return !tabBlocked.value;
 }
 
 function renewTabLease(): void {
   if (tabBlocked.value) return;
-  const existing = readTabLease();
-  if (existing && existing.tabId !== tabId && existing.expiresAt > Date.now()) {
+  if (!tabLease.renew()) {
     tabBlocked.value = true;
     resetSession(false);
-    return;
   }
-  localStorage.setItem(TAB_LEASE_KEY, JSON.stringify({ tabId, expiresAt: Date.now() + TAB_LEASE_MS } satisfies TabLease));
 }
 
 function releaseTabLease(): void {
-  if (readTabLease()?.tabId === tabId) localStorage.removeItem(TAB_LEASE_KEY);
+  tabLease.release();
 }
 
 function retryTabLease(): void {
@@ -144,8 +123,7 @@ function retryTabLease(): void {
 
 function handleTabLeaseChanged(event: StorageEvent): void {
   if (event.key !== TAB_LEASE_KEY || tabBlocked.value) return;
-  const lease = readTabLease();
-  if (lease && lease.tabId !== tabId && lease.expiresAt > Date.now()) {
+  if (tabLease.heldByOther()) {
     tabBlocked.value = true;
     resetSession(false);
   }
