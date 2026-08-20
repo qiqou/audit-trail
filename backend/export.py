@@ -6,7 +6,6 @@
 - 备份 .auditbak 落在项目上级目录（备份不应混入项目数据）
 """
 
-import csv
 import hashlib
 import io
 import json
@@ -23,6 +22,7 @@ from pathlib import Path, PurePosixPath
 from config import PROJECT_EXT
 from database import ATTACH_DIR, OUT_DIR, SYSTEM_METADATA_NAMES, AuditProject, _now, _safe
 from infra.exporters.confirmation_docx import write_confirmation_docx
+from infra.exporters.operational import write_audit_log_csv, write_diagnostics_support_package
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from platform_adapter import harden_project
@@ -299,12 +299,8 @@ def export_audit_log_csv(proj: AuditProject, rows: list[dict]) -> dict:
     out_dir = proj.root / OUT_DIR
     out_dir.mkdir(exist_ok=True)
     out_path = _unique_path(out_dir, f"操作日志_{_safe(proj.project_name)}_{_now_ts()}.csv")
-    fields = ("id", "created_at", "operator", "action", "target", "detail", "event_uuid", "issue_uuid", "file_uuid")
-    with out_path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows({field: row.get(field, "") for field in fields} for row in rows)
-    return {"filename": out_path.name, "abs_path": str(out_path), "count": len(rows)}
+    count = write_audit_log_csv(out_path, rows)
+    return {"filename": out_path.name, "abs_path": str(out_path), "count": count}
 
 
 def export_diagnostics_support_package(proj: AuditProject) -> dict:
@@ -312,9 +308,7 @@ def export_diagnostics_support_package(proj: AuditProject) -> dict:
     out_dir = proj.root / OUT_DIR
     out_dir.mkdir(exist_ok=True)
     out_path = _unique_path(out_dir, f"审迹诊断支持包_{_now_ts()}.json")
-    with out_path.open("w", encoding="utf-8") as handle:
-        json.dump(proj.diagnostics_summary(), handle, ensure_ascii=False, indent=2, sort_keys=True)
-        handle.write("\n")
+    write_diagnostics_support_package(out_path, proj.diagnostics_summary())
     return {"filename": out_path.name}
 
 
