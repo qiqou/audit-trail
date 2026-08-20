@@ -579,6 +579,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/import/excel/commit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Commit Excel Import
+         * @description 提交与预检摘要一致的 Excel；底稿写入为整批原子替换。
+         */
+        post: operations["commit_excel_import_api_import_excel_commit_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/import/excel/preflight": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import Excel Preflight
+         * @description 只读校验 Excel，显示影响摘要后发放一次性提交令牌。
+         */
+        post: operations["import_excel_preflight_api_import_excel_preflight_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/import/merge": {
         parameters: {
             query?: never;
@@ -1988,8 +2028,18 @@ export interface components {
             /** Renames */
             renames: components["schemas"]["RenameItem"][];
         };
+        /** Body_commit_excel_import_api_import_excel_commit_post */
+        Body_commit_excel_import_api_import_excel_commit_post: {
+            /** File */
+            file: string;
+        };
         /** Body_import_excel_api_import_excel_post */
         Body_import_excel_api_import_excel_post: {
+            /** File */
+            file: string;
+        };
+        /** Body_import_excel_preflight_api_import_excel_preflight_post */
+        Body_import_excel_preflight_api_import_excel_preflight_post: {
             /** File */
             file: string;
         };
@@ -3449,6 +3499,78 @@ export interface operations {
         requestBody: {
             content: {
                 "multipart/form-data": components["schemas"]["Body_import_excel_api_import_excel_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    commit_excel_import_api_import_excel_commit_post: {
+        parameters: {
+            query?: {
+                confirmation_token?: string;
+            };
+            header?: {
+                "x-session"?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_commit_excel_import_api_import_excel_commit_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    import_excel_preflight_api_import_excel_preflight_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-session"?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_import_excel_preflight_api_import_excel_preflight_post"];
             };
         };
         responses: {

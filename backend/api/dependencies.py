@@ -25,6 +25,7 @@ class SessionContext:
         self.last_seen = time.monotonic()
         self.archive_preflights: dict[str, dict] = {}
         self.merge_preflights: dict[str, dict] = {}
+        self.excel_import_preflights: dict[str, dict] = {}
         self.batch_issue_preflights: dict[str, dict] = {}
         self.preempted = False
 

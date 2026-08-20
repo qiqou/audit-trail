@@ -22,6 +22,8 @@ def build_router(
     export_diagnostics_support_package_action: Callable[[str], dict],
     import_template_action: Callable[[str], Any],
     import_excel_action: Callable[..., Awaitable[dict]],
+    import_excel_preflight_action: Callable[..., Awaitable[dict]],
+    commit_excel_import_action: Callable[..., Awaitable[dict]],
     import_merge_action: Callable[..., Awaitable[dict]],
     import_merge_local_action: Callable[..., Awaitable[dict]],
     import_merge_local_preflight_action: Callable[..., Awaitable[dict]],
@@ -75,6 +77,18 @@ def build_router(
     async def import_excel(file: UploadFile = File(...), operator: str = Depends(get_operator)):
         """上传整理好的 xlsx，一键导入底稿（单位不存在自动创建）。"""
         return await import_excel_action(file, operator)
+
+    @router.post("/api/import/excel/preflight")
+    async def import_excel_preflight(file: UploadFile = File(...), _: str = Depends(get_operator)):
+        """只读校验 Excel，显示影响摘要后发放一次性提交令牌。"""
+        return await import_excel_preflight_action(file, _)
+
+    @router.post("/api/import/excel/commit")
+    async def commit_excel_import(
+        file: UploadFile = File(...), confirmation_token: str = "", operator: str = Depends(get_operator),
+    ):
+        """提交与预检摘要一致的 Excel；底稿写入为整批原子替换。"""
+        return await commit_excel_import_action(file, confirmation_token, operator)
 
     @router.post("/api/import/merge")
     async def import_merge(files: list[UploadFile] = File(...), operator: str = Depends(get_operator)):

@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import { api, type AmountSettings, type ArchivePreflight, type AuditLog, type BatchIssueMetadataChanges, type BackupSettings, type ImportResult, type MergePreflight, type MergeResult, type ProjectInfo, type ProjectSummary, type RecycledFile, type RecycledIssue, type RecycledIssuePreview, type RecycledUnit, type RecoveryPoint, type ScanStatus, type SearchResult, type SummaryIssue, type Unit } from "../api/client";
+import { api, type AmountSettings, type ArchivePreflight, type AuditLog, type BatchIssueMetadataChanges, type BackupSettings, type ExcelImportPreflight, type ImportResult, type MergePreflight, type MergeResult, type ProjectInfo, type ProjectSummary, type RecycledFile, type RecycledIssue, type RecycledIssuePreview, type RecycledUnit, type RecoveryPoint, type ScanStatus, type SearchResult, type SummaryIssue, type Unit } from "../api/client";
 import { formatIssueNo } from "../format";
 
 type AutoSaveMode = "realtime" | "5m" | "20m";
@@ -45,6 +45,7 @@ const restoreFile = ref<File | null>(null);
 const restoreLocalPath = ref("");
 const restoreTarget = ref("");
 const importResult = ref<ImportResult | null>(null);
+const importPreflight = ref<ExcelImportPreflight | null>(null);
 const mergeResult = ref<MergeResult | null>(null);
 const exportScope = ref<"project" | "unit">("project");
 const exportUnitId = ref<number | null>(null);
@@ -818,7 +819,11 @@ onBeforeUnmount(() => window.clearTimeout(scanTimer));
 
 function inputFile(event: Event, target: "import" | "restore"): void {
   const file = (event.target as HTMLInputElement).files?.[0] ?? null;
-  if (target === "import") importFile.value = file;
+  if (target === "import") {
+    importFile.value = file;
+    importPreflight.value = null;
+    importResult.value = null;
+  }
   else restoreFile.value = file;
 }
 
@@ -891,11 +896,21 @@ async function importExcel(): Promise<void> {
   }
   working.value = true;
   try {
-    importResult.value = await api.importExcel(importFile.value);
+    importPreflight.value = await api.preflightExcelImport(importFile.value);
+    if (importPreflight.value.errors.length) {
+      ElMessage.warning(`预检发现 ${importPreflight.value.errors.length} 项错误，未写入项目`);
+      return;
+    }
+    await ElMessageBox.confirm(
+      `将新增 ${importPreflight.value.imported} 条底稿，并新建 ${importPreflight.value.new_units} 个单位。确认提交？`,
+      "Excel 导入预检通过",
+      { type: "warning", confirmButtonText: "确认提交", cancelButtonText: "取消" },
+    );
+    importResult.value = await api.commitExcelImport(importFile.value, importPreflight.value.confirmation_token);
     emit("dataChanged");
     ElMessage.success(`导入完成：${importResult.value.imported} 条底稿${importResult.value.skipped ? `，跳过 ${importResult.value.skipped} 条` : ""}`);
   } catch (error) {
-    report(error);
+    if (error !== "cancel") report(error);
   } finally {
     working.value = false;
   }
@@ -1321,10 +1336,11 @@ async function resetProject(): Promise<void> {
       <div v-else-if="activePanel === 'rename'" class="operation-panel"><p>项目名称会出现在导出文件名和归档包目录中，不会改变项目文件夹路径。</p><el-input v-model="projectNameDraft" placeholder="项目名称" @keyup.enter="renameProject" /><div class="tool-actions"><el-button type="primary" :loading="working" @click="renameProject">保存名称</el-button></div></div>
 
       <div v-else-if="activePanel === 'import'" class="operation-panel">
-      <p>先下载模板。带 * 的三列为必填；不存在的被审计单位将自动创建。</p>
-      <div class="tool-actions"><el-button :loading="working" @click="downloadTemplate">下载 Excel 模板</el-button><el-button :loading="working" @click="importPicker?.click()">选择 .xlsx 文件</el-button><el-button type="primary" :loading="working" :disabled="!importFile" @click="importExcel">开始导入</el-button></div>
+      <p>先下载模板。带 * 的三列为必填；不存在的被审计单位将自动创建。提交前会先在隔离副本预检，不会直接写入项目。</p>
+      <div class="tool-actions"><el-button :loading="working" @click="downloadTemplate">下载 Excel 模板</el-button><el-button :loading="working" @click="importPicker?.click()">选择 .xlsx 文件</el-button><el-button type="primary" :loading="working" :disabled="!importFile" @click="importExcel">预检并提交</el-button></div>
       <input ref="importPicker" class="hidden-input" type="file" accept=".xlsx" @change="inputFile($event, 'import')" />
       <span v-if="importFile" class="selected-file">已选：{{ importFile.name }}</span>
+      <div v-if="importPreflight && importPreflight.errors.length" class="operation-result"><strong>预检未通过：</strong>发现 {{ importPreflight.errors.length }} 项错误，项目未被修改。<ul><li v-for="error in importPreflight.errors.slice(0, 10)" :key="error">{{ error }}</li></ul></div>
       <div v-if="importResult" class="operation-result"><strong>导入结果：</strong>成功 {{ importResult.imported }} 条，跳过 {{ importResult.skipped }} 条，新建单位 {{ importResult.new_units }} 个。<ul v-if="importResult.errors.length"><li v-for="error in importResult.errors.slice(0, 10)" :key="error">{{ error }}</li></ul><el-button v-if="importResult.errors.length" text size="small" @click="downloadImportReport">下载完整导入报告</el-button></div>
     </div>
 

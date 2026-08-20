@@ -318,6 +318,11 @@ export interface ImportResult {
   errors: string[];
 }
 
+export interface ExcelImportPreflight extends ImportResult {
+  confirmation_token: string;
+  expires_in_seconds: number;
+}
+
 export interface ExportResult {
   filename: string;
   count: number;
@@ -666,6 +671,20 @@ class ApiClient {
     const form = new FormData();
     form.append("file", file, file.name);
     return this.request("/api/import/excel", { method: "POST", body: form });
+  }
+
+  preflightExcelImport(file: File): Promise<ExcelImportPreflight> {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return this.request("/api/import/excel/preflight", { method: "POST", body: form });
+  }
+
+  commitExcelImport(file: File, confirmationToken: string): Promise<ImportResult> {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return this.request(`/api/import/excel/commit?confirmation_token=${encodeURIComponent(confirmationToken)}`, {
+      method: "POST", body: form,
+    });
   }
 
   mergeBackups(files: File[]): Promise<MergeResult> {

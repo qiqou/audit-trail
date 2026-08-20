@@ -1880,6 +1880,24 @@ def import_from_excel(proj: AuditProject, file_path, operator: str) -> dict:
         shutil.rmtree(stage_root, ignore_errors=True)
 
 
+def preflight_excel_import(proj: AuditProject, file_path) -> dict:
+    """在临时项目副本内执行导入校验，保证预检不会写当前项目。"""
+    stage_root = Path(tempfile.mkdtemp(prefix=".audit_excel_preflight_", dir=proj.root.parent))
+    shutil.rmtree(stage_root)
+    stage: AuditProject | None = None
+    try:
+        stage = _clone_project_for_merge(proj, stage_root)
+        result = _import_from_excel_in_place(stage, file_path, "预检")
+        return {
+            "imported": result["imported"], "skipped": result["skipped"],
+            "new_units": result["new_units"], "errors": result["errors"],
+        }
+    finally:
+        if stage is not None:
+            stage.close()
+        shutil.rmtree(stage_root, ignore_errors=True)
+
+
 def merge_preflight(proj: AuditProject, bak_paths: list[str | Path]) -> dict:
     """只读预检备份来源，识别不可执行项与需要负责人确认的并存冲突。
 

@@ -89,6 +89,20 @@
         "title": "BatchRenameReq",
         "type": "object"
       },
+      "Body_commit_excel_import_api_import_excel_commit_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_commit_excel_import_api_import_excel_commit_post",
+        "type": "object"
+      },
       "Body_import_excel_api_import_excel_post": {
         "properties": {
           "file": {
@@ -101,6 +115,20 @@
           "file"
         ],
         "title": "Body_import_excel_api_import_excel_post",
+        "type": "object"
+      },
+      "Body_import_excel_preflight_api_import_excel_preflight_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_import_excel_preflight_api_import_excel_preflight_post",
         "type": "object"
       },
       "Body_import_merge_api_import_merge_post": {
@@ -2547,6 +2575,114 @@
           }
         },
         "summary": "Import Excel"
+      }
+    },
+    "/api/import/excel/commit": {
+      "post": {
+        "description": "提交与预检摘要一致的 Excel；底稿写入为整批原子替换。",
+        "operationId": "commit_excel_import_api_import_excel_commit_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "confirmation_token",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Confirmation Token",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-session",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Session",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_commit_excel_import_api_import_excel_commit_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Commit Excel Import"
+      }
+    },
+    "/api/import/excel/preflight": {
+      "post": {
+        "description": "只读校验 Excel，显示影响摘要后发放一次性提交令牌。",
+        "operationId": "import_excel_preflight_api_import_excel_preflight_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-session",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Session",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_import_excel_preflight_api_import_excel_preflight_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Import Excel Preflight"
       }
     },
     "/api/import/merge": {

@@ -260,6 +260,7 @@ def _bind_project_identity(project: AuditProject, ctx: SessionContext) -> None:
     project.set_audit_identity(ctx.identity.account_id, ctx.identity.device_id)
     ctx.archive_preflights.clear()
     ctx.merge_preflights.clear()
+    ctx.excel_import_preflights.clear()
     ctx.batch_issue_preflights.clear()
 
 
@@ -995,6 +996,100 @@ async def import_excel(file: UploadFile = File(...), operator: str = Depends(get
         tmp.unlink(missing_ok=True)
 
 
+def _import_target_fingerprint(project: AuditProject) -> str:
+    """仅用于预检令牌校验；任一项目写入都会改变永久日志末端。"""
+    last_log = project._conn.execute(
+        "SELECT id, event_hash FROM audit_log ORDER BY id DESC LIMIT 1"
+    ).fetchone() or (0, "")
+    payload = f"{project.project_uuid}|{last_log[0]}|{last_log[1]}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+async def import_excel_preflight(file: UploadFile = File(...), _: str = Depends(get_operator)):
+    """在隔离副本内校验 Excel，不写入当前项目，并发放一次性确认令牌。"""
+    import tempfile
+    from uuid import uuid4
+
+    from export import preflight_excel_import
+    from limits import MAX_FILE_SIZE, human_size
+
+    project = get_project()
+    suffix = Path(file.filename or "import.xlsx").suffix or ".xlsx"
+    tmp = Path(tempfile.gettempdir()) / f"audit_import_preflight_{uuid4().hex[:8]}{suffix}"
+    size = 0
+    with open(tmp, "wb") as fh:
+        while True:
+            chunk = await file.read(1 << 20)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_FILE_SIZE:
+                tmp.unlink(missing_ok=True)
+                raise HTTPException(status_code=400, detail=f"导入文件超过上限 {human_size(MAX_FILE_SIZE)}，请拆分后再导入")
+            fh.write(chunk)
+    try:
+        result = await run_in_threadpool(preflight_excel_import, project, tmp)
+        token = uuid.uuid4().hex
+        ctx = _ctx_var.get()
+        assert ctx is not None
+        ctx.excel_import_preflights[token] = {
+            "expires_at": time.monotonic() + 600,
+            "file_hash": await run_in_threadpool(_sha256_of, tmp),
+            "target_fingerprint": _import_target_fingerprint(project),
+            "project_uuid": project.project_uuid,
+        }
+        return {**result, "confirmation_token": token, "expires_in_seconds": 600}
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+async def commit_excel_import(
+    file: UploadFile = File(...), confirmation_token: str = "", operator: str = Depends(get_operator),
+):
+    """执行已预检 Excel 的原子导入；文件或项目发生变化即拒绝提交。"""
+    import tempfile
+    from uuid import uuid4
+
+    from export import import_from_excel as do_import
+    from limits import MAX_FILE_SIZE, human_size
+
+    project = get_project()
+    ctx = _ctx_var.get()
+    assert ctx is not None
+    approved = ctx.excel_import_preflights.get(confirmation_token.strip())
+    if not approved or approved["expires_at"] < time.monotonic():
+        ctx.excel_import_preflights.pop(confirmation_token.strip(), None)
+        raise HTTPException(status_code=409, detail="请先完成 Excel 导入预检，或重新预检后再提交")
+    if approved["project_uuid"] != project.project_uuid or approved["target_fingerprint"] != _import_target_fingerprint(project):
+        raise HTTPException(status_code=409, detail="项目内容已变化，请重新预检后再提交")
+    suffix = Path(file.filename or "import.xlsx").suffix or ".xlsx"
+    tmp = Path(tempfile.gettempdir()) / f"audit_import_commit_{uuid4().hex[:8]}{suffix}"
+    size = 0
+    with open(tmp, "wb") as fh:
+        while True:
+            chunk = await file.read(1 << 20)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_FILE_SIZE:
+                tmp.unlink(missing_ok=True)
+                raise HTTPException(status_code=400, detail=f"导入文件超过上限 {human_size(MAX_FILE_SIZE)}，请拆分后再导入")
+            fh.write(chunk)
+    try:
+        if approved["file_hash"] != await run_in_threadpool(_sha256_of, tmp):
+            raise HTTPException(status_code=409, detail="待导入文件已变化，请重新预检后再提交")
+        result = await run_in_threadpool(do_import, project, tmp, operator)
+        ctx.excel_import_preflights.pop(confirmation_token.strip(), None)
+        result["filename"] = file.filename or ""
+        return result
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 async def import_merge(files: list[UploadFile] = File(...),
                        operator: str = Depends(get_operator)):
     """旧上传入口已停用：正式合并需本机路径预检，避免大包限制和绕过冲突确认。"""
@@ -1509,6 +1604,8 @@ app.include_router(build_operations_router(
     export_diagnostics_support_package,
     import_template,
     import_excel,
+    import_excel_preflight,
+    commit_excel_import,
     import_merge,
     import_merge_local,
     import_merge_local_preflight,
