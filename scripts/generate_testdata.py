@@ -16,8 +16,7 @@ BACKEND_DIR = ROOT_DIR / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from database import AuditProject, SCHEMA_VERSION  # noqa: E402
-
+from database import SCHEMA_VERSION, AuditProject
 
 PRESETS = {
     "small": {"units": 3, "issues": 12, "files": 18, "exchange_sessions": 2},

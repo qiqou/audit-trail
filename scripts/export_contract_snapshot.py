@@ -16,8 +16,8 @@ BACKEND_DIR = ROOT_DIR / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from database import AuditProject, SCHEMA_VERSION  # noqa: E402
-from export import IMPORT_HEADERS, SUMMARY_HEADERS  # noqa: E402
+from database import SCHEMA_VERSION, AuditProject
+from export import IMPORT_HEADERS, SUMMARY_HEADERS
 
 
 def _table_contract(project: AuditProject) -> dict[str, dict]:

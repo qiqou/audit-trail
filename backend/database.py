@@ -20,7 +20,7 @@ import sqlite3
 import threading
 import uuid
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath
 from typing import ClassVar
@@ -2092,7 +2092,7 @@ class AuditProject:
     def _template_record(row: sqlite3.Row) -> dict:
         data = json.loads(str(row["snapshot"] or "{}"))
         if not isinstance(data, dict):
-            raise ValueError("底稿模板数据损坏，请从可信备份恢复")
+            raise TypeError("底稿模板数据损坏，请从可信备份恢复")
         return {
             "id": int(row["id"]),
             "template_uuid": str(row["template_uuid"]),
@@ -2170,7 +2170,10 @@ class AuditProject:
         if not value:
             return ""
         try:
-            return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d")
+            parsed = date.fromisoformat(value)
+            if parsed.isoformat() != value:
+                raise ValueError
+            return parsed.isoformat()
         except ValueError as exc:
             raise ValueError("截止日格式应为 YYYY-MM-DD") from exc
 
@@ -2329,7 +2332,7 @@ class AuditProject:
             )
         return True
 
-    _BATCH_METADATA_FIELDS = {"department", "category", "author", "reviewer"}
+    _BATCH_METADATA_FIELDS: ClassVar[set[str]] = {"department", "category", "author", "reviewer"}
 
     def preflight_batch_issue_metadata(self, issue_ids: list[int], changes: dict) -> dict:
         """只读核对批量元数据修改范围；拒绝归档、删除或跨项目的底稿。"""

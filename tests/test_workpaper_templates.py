@@ -1,5 +1,4 @@
 import pytest
-
 from database import SCHEMA_VERSION, AuditProject
 
 
