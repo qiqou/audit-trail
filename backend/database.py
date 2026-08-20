@@ -45,6 +45,7 @@ from domain.review_workflow import (
     note_state,
     validate_review_event,
 )
+from repositories.units import UnitRepository
 from rich_text import rich_html_to_plain_text, sanitize_rich_html
 
 DB_FILE = "audit.db"
@@ -243,6 +244,7 @@ class AuditProject:
             self._lock,
         )
         self._conn.row_factory = sqlite3.Row
+        self._units = UnitRepository(self._conn)
         self._conn.execute("PRAGMA foreign_keys = ON")
         # 合并/导入换库交换窗口标记（I2）：交换期间读请求短暂等待而非命中已关闭连接
         self._swapping = False
@@ -1597,17 +1599,10 @@ class AuditProject:
     # ───────────────────────── 审计单位 ─────────────────────────
 
     def get_unit(self, unit_id: int, *, include_deleted: bool = False):
-        sql = "SELECT * FROM units WHERE id=?"
-        if not include_deleted:
-            sql += " AND deleted_at IS NULL"
-        r = self._conn.execute(sql, (unit_id,)).fetchone()
-        return dict(r) if r else None
+        return self._units.get(unit_id, include_deleted=include_deleted)
 
     def list_units(self) -> list[dict]:
-        rows = self._conn.execute(
-            "SELECT * FROM units WHERE deleted_at IS NULL ORDER BY sort_order, id"
-        ).fetchall()
-        return [dict(r) for r in rows]
+        return self._units.list_active()
 
     def add_unit(self, name: str, operator: str) -> int:
         name = str(name).strip()
@@ -1627,10 +1622,7 @@ class AuditProject:
         return uid
 
     def get_unit_by_name(self, name: str):
-        r = self._conn.execute(
-            "SELECT * FROM units WHERE name=? AND deleted_at IS NULL", (str(name).strip(),)
-        ).fetchone()
-        return dict(r) if r else None
+        return self._units.get_active_by_name(name)
 
     def rename_unit(self, unit_id: int, new_name: str, operator: str):
         old = self.get_unit(unit_id)

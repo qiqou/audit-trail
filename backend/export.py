@@ -1846,6 +1846,10 @@ def _replace_project_from_merge_stage(proj: AuditProject, stage: AuditProject) -
             proj._conn = sqlite3.connect(proj.db_path, check_same_thread=False)
             proj._conn.row_factory = sqlite3.Row
             proj._conn.execute("PRAGMA foreign_keys = ON")
+            # 导入/合并原子替换会重建连接；所有读取仓储必须同步绑定新连接。
+            from repositories.units import UnitRepository
+
+            proj._units = UnitRepository(proj._conn)
 
 
 def merge_backups(proj: AuditProject, bak_paths, operator: str) -> dict:
