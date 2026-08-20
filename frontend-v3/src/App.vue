@@ -9,6 +9,7 @@ import { api, type HealthResult, type ProjectInfo } from "./api/client";
 import { useRuntimeStore } from "./app/runtimeStore";
 import { useSessionStore } from "./app/sessionStore";
 import { useProjectStore } from "./app/projectStore";
+import { useThemeStore, type Theme } from "./app/themeStore";
 import { APP_VERSION_LABEL } from "./version";
 
 // 项目列表/登录页不需要工作区和低频操作面板，打开项目时才加载，缩短首次启动等待。
@@ -18,8 +19,10 @@ const router = useRouter();
 const runtimeStore = useRuntimeStore();
 const sessionStore = useSessionStore();
 const projectStore = useProjectStore();
+const themeStore = useThemeStore();
 const { operator } = storeToRefs(sessionStore);
 const { project, units, departments, categories, issueNumberRule } = storeToRefs(projectStore);
+const { theme } = storeToRefs(themeStore);
 
 type RecentProject = { path: string; name: string; time: number };
 type AutoSaveMode = "realtime" | "5m" | "20m";
@@ -65,13 +68,6 @@ const health = ref<HealthResult | null>(null);
 const healthDialogVisible = ref(false);
 const busy = ref(false);
 const recentProjects = ref<RecentProject[]>(loadRecentLocal());
-type Theme = "dark" | "light" | "green" | "paper";
-const storedTheme = localStorage.getItem("audit_theme");
-const theme = ref<Theme>(
-  storedTheme === "light" || storedTheme === "green" || storedTheme === "dark" || storedTheme === "paper"
-    ? storedTheme
-    : "dark",
-);
 const storedAutoSaveMode = localStorage.getItem(AUTO_SAVE_KEY);
 const autoSaveMode = ref<AutoSaveMode>(
   storedAutoSaveMode === "realtime" || storedAutoSaveMode === "20m" || storedAutoSaveMode === "5m"
@@ -168,10 +164,7 @@ function handleBeforeUnload(event: BeforeUnloadEvent): void {
 }
 
 function applyTheme(value: Theme): void {
-  theme.value = value;
-  document.documentElement.dataset.theme = value;
-  document.documentElement.classList.toggle("dark", value === "dark");
-  localStorage.setItem("audit_theme", value);
+  themeStore.apply(value);
 }
 
 applyTheme(theme.value);
