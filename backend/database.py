@@ -25,7 +25,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath
 from typing import ClassVar
 
-from db.migration_runner import prepare_schema_migration, record_schema_migration
+from db.migration_runner import prepare_schema_migration, record_schema_migration, validate_completed_schema
 from domain.errors import ConflictError
 from domain.issue_workflow import (
     ISSUE_STATUSES,
@@ -683,6 +683,15 @@ class AuditProject:
         # 迁移。新项目已在上方 CREATE TABLE 中直接得到约束。
         self._rebuild_relational_tables_if_needed()
         with self._lock, self._conn:
+            validate_completed_schema(self._conn, required_columns={
+                "meta": {"key", "value"},
+                "units": {"id", "unit_uuid", "name", "sort_order"},
+                "issues": {"id", "issue_uuid", "unit_id", "seq", "sort_order", "status"},
+                "files": {"id", "file_uuid", "unit_id", "rel_path", "sha256"},
+                "issue_versions": {"id", "issue_id", "version_no", "snapshot"},
+                "issue_files": {"issue_id", "file_id"},
+                "schema_migrations": {"version", "applied_at", "backup_rel_path"},
+            })
             record_schema_migration(
                 self._conn, schema_version_key=SCHEMA_VERSION_KEY, target_version=SCHEMA_VERSION,
                 applied_at=_now(), backup_rel_path=migration.backup_rel_path,

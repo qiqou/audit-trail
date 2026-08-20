@@ -30,3 +30,13 @@ def test_preflight_database_reports_foreign_key_violation(tmp_path):
         connection.execute("PRAGMA foreign_keys = OFF")
         connection.executescript("CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE child(parent_id INTEGER REFERENCES parent(id)); INSERT INTO child VALUES(7);")
         assert "项目包含孤儿关联或外键约束异常" in preflight_database(connection)
+
+
+def test_completed_migration_validation_rejects_missing_required_column(tmp_path):
+    from db.migration_runner import validate_completed_schema
+
+    db = tmp_path / "incomplete.db"
+    with sqlite3.connect(db) as connection:
+        connection.execute("CREATE TABLE units(id INTEGER PRIMARY KEY, name TEXT)")
+        with pytest.raises(ValueError, match="units.unit_uuid"):
+            validate_completed_schema(connection, required_columns={"units": {"id", "unit_uuid"}})

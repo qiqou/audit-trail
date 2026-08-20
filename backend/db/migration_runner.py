@@ -91,3 +91,33 @@ def record_schema_migration(
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at, backup_rel_path) VALUES(?,?,?)",
         (target_version, applied_at, backup_rel_path),
     )
+
+
+def validate_completed_schema(
+    connection: sqlite3.Connection, *, required_columns: dict[str, set[str]],
+) -> None:
+    """在写入版本号前确认迁移后的关键结构和关系仍可用。
+
+    这一步只报告问题，不自动修补或删除记录。调用方仍处于版本记录事务之前，
+    因此失败时不会把不完整结构标记为已完成迁移。
+    """
+    tables = {str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    missing_tables = sorted(set(required_columns) - tables)
+    missing_columns: list[str] = []
+    for table, columns in required_columns.items():
+        if table not in tables:
+            continue
+        actual = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+        missing_columns.extend(f"{table}.{column}" for column in sorted(columns - actual))
+    problems: list[str] = []
+    if missing_tables:
+        problems.append("缺少数据表：" + "、".join(missing_tables))
+    if missing_columns:
+        problems.append("缺少关键列：" + "、".join(missing_columns))
+    integrity = connection.execute("PRAGMA integrity_check").fetchone()
+    if integrity is not None and integrity[0] != "ok":
+        problems.append("SQLite 完整性检查失败")
+    if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+        problems.append("项目包含孤儿关联或外键约束异常")
+    if problems:
+        raise ValueError("项目迁移后校验未通过：" + "；".join(problems) + "。请从迁移前快照恢复后处理。")
