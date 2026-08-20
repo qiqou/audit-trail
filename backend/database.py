@@ -46,6 +46,7 @@ from domain.review_workflow import (
     validate_review_event,
 )
 from repositories.units import UnitRepository
+from repositories.issues import IssueRepository
 from rich_text import rich_html_to_plain_text, sanitize_rich_html
 
 DB_FILE = "audit.db"
@@ -245,6 +246,7 @@ class AuditProject:
         )
         self._conn.row_factory = sqlite3.Row
         self._units = UnitRepository(self._conn)
+        self._issues = IssueRepository(self._conn)
         self._conn.execute("PRAGMA foreign_keys = ON")
         # 合并/导入换库交换窗口标记（I2）：交换期间读请求短暂等待而非命中已关闭连接
         self._swapping = False
@@ -1103,6 +1105,7 @@ class AuditProject:
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA busy_timeout = 5000")
         self._units = UnitRepository(self._conn)
+        self._issues = IssueRepository(self._conn)
 
     def close(self):
         self._conn.close()
@@ -1886,19 +1889,7 @@ class AuditProject:
 
     def list_issues(self, unit_id: int) -> list[dict]:
         """底稿列表，按单位内序号排序，附附件数。"""
-        rows = self._conn.execute(
-            """
-            SELECT i.*, COALESCE(file_counts.file_count, 0) AS file_count
-            FROM issues i
-            LEFT JOIN (
-                SELECT issue_id, COUNT(*) AS file_count FROM issue_files GROUP BY issue_id
-            ) AS file_counts ON file_counts.issue_id=i.id
-            WHERE i.unit_id=? AND i.deleted_at IS NULL
-            ORDER BY i.sort_order, i.id
-            """,
-            (unit_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        return self._issues.list_active_for_unit(unit_id)
 
     def list_issues_by_unit(self) -> dict[int, list[dict]]:
         """一次查询取得全项目底稿树，供 V3 单页双视图使用。
@@ -1906,23 +1897,7 @@ class AuditProject:
         不能让前端按每个单位重复调用 list_issues()，否则单位数量增加时会产生
         N+1 请求和 N 次 SQLite 查询。结果按单位显示顺序、底稿序号排序。
         """
-        rows = self._conn.execute(
-            """
-            SELECT i.*, COALESCE(file_counts.file_count, 0) AS file_count
-            FROM issues i
-            JOIN units u ON u.id=i.unit_id
-            LEFT JOIN (
-                SELECT issue_id, COUNT(*) AS file_count FROM issue_files GROUP BY issue_id
-            ) AS file_counts ON file_counts.issue_id=i.id
-            WHERE i.deleted_at IS NULL AND u.deleted_at IS NULL
-            ORDER BY u.sort_order, u.id, i.sort_order, i.id
-            """
-        ).fetchall()
-        grouped: dict[int, list[dict]] = {}
-        for row in rows:
-            issue = dict(row)
-            grouped.setdefault(issue["unit_id"], []).append(issue)
-        return grouped
+        return self._issues.list_active_grouped_by_unit()
 
     def summary(self) -> dict:
         """项目汇总：以底稿明细为主体，附带中性的项目数据概览。
@@ -2049,11 +2024,7 @@ class AuditProject:
         }
 
     def get_issue(self, issue_id: int, *, include_deleted: bool = False):
-        sql = "SELECT * FROM issues WHERE id=?"
-        if not include_deleted:
-            sql += " AND deleted_at IS NULL"
-        r = self._conn.execute(sql, (issue_id,)).fetchone()
-        return dict(r) if r else None
+        return self._issues.get(issue_id, include_deleted=include_deleted)
 
     def _next_seq(self, unit_id: int) -> int:
         """取单位内最小可用正整数；删除后仅释放该号，不重排已有底稿。"""
