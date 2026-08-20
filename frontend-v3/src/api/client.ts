@@ -520,6 +520,10 @@ class ApiClient {
     return this.request(`/api/logs/export?${auditLogFilterParams(filters)}`, { method: "POST" });
   }
 
+  exportDiagnosticsSupportPackage(): Promise<{ filename: string; download_url: string }> {
+    return this.request("/api/diagnostics/support-package", { method: "POST" });
+  }
+
   chooseFolder(): Promise<{ path: string; warning?: string }> {
     return this.request("/api/system/choose-folder", { method: "POST" });
   }

@@ -4061,6 +4061,37 @@ class AuditProject:
             previous = str(item.get("event_hash") or "")
         return {"ok": not problems, "checked": len(rows), "problems": problems}
 
+    def diagnostics_summary(self) -> dict:
+        """生成可外发的最小诊断摘要，绝不读取或返回业务正文与文件标识。"""
+        table_names = (
+            "units", "issues", "files", "issue_versions", "audit_log",
+            "issue_drafts", "review_note_events",
+        )
+        with self._lock:
+            counts = {
+                table: int(self._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                for table in table_names
+            }
+        audit_log_chain = self.verify_audit_log_chain()
+        return {
+            "format": "audit-trail-diagnostics-v1",
+            "generated_at": _now(),
+            "schema_version": SCHEMA_VERSION,
+            "privacy": {
+                "included": ["schema_version", "record_counts", "audit_log_chain_status"],
+                "excluded": [
+                    "project_name", "unit_names", "operator_names", "issue_content",
+                    "attachment_names", "attachment_paths", "attachment_content",
+                ],
+            },
+            "record_counts": counts,
+            "audit_log_chain": {
+                "ok": audit_log_chain["ok"],
+                "checked": audit_log_chain["checked"],
+                "problem_ids": [item["id"] for item in audit_log_chain["problems"]],
+            },
+        }
+
     # ───────────────────────── 工具 ─────────────────────────
 
     @staticmethod

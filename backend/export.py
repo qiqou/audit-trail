@@ -306,6 +306,17 @@ def export_audit_log_csv(proj: AuditProject, rows: list[dict]) -> dict:
     return {"filename": out_path.name, "abs_path": str(out_path), "count": len(rows)}
 
 
+def export_diagnostics_support_package(proj: AuditProject) -> dict:
+    """输出可供支持人员读取的最小 JSON 摘要，不包含项目业务数据。"""
+    out_dir = proj.root / OUT_DIR
+    out_dir.mkdir(exist_ok=True)
+    out_path = _unique_path(out_dir, f"审迹诊断支持包_{_now_ts()}.json")
+    with out_path.open("w", encoding="utf-8") as handle:
+        json.dump(proj.diagnostics_summary(), handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
+    return {"filename": out_path.name}
+
+
 def _add_archive_dir(zf: zipfile.ZipFile, path: str, reserved: set[str]) -> None:
     """写入空目录，保留无附件问题和空文件夹证据的既有归档结构。"""
     normalized = path.strip("/")

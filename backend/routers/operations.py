@@ -19,6 +19,7 @@ def build_router(
     get_operator: Callable[..., str],
     list_logs_action: Callable[..., list[dict]],
     export_audit_logs_action: Callable[..., dict],
+    export_diagnostics_support_package_action: Callable[[str], dict],
     import_template_action: Callable[[str], Any],
     import_excel_action: Callable[..., Awaitable[dict]],
     import_merge_action: Callable[..., Awaitable[dict]],
@@ -59,6 +60,11 @@ def build_router(
     ):
         """导出项目永久操作日志 CSV，供项目经理复核或支持留档。"""
         return export_audit_logs_action(actor, action, start_date, end_date, operator)
+
+    @router.post("/api/diagnostics/support-package")
+    def export_diagnostics_support_package(operator: str = Depends(get_operator)):
+        """生成默认剔除业务内容和路径的本机诊断支持包。"""
+        return export_diagnostics_support_package_action(operator)
 
     @router.get("/api/import/template")
     def import_template(_: str = Depends(get_operator)):

@@ -931,6 +931,16 @@ def export_audit_logs(
     }
 
 
+def export_diagnostics_support_package(operator: str = Depends(get_operator)):
+    """用户主动生成隐私最小化诊断包，用于排查本机项目运行问题。"""
+    from export import export_diagnostics_support_package as build_support_package
+
+    project = get_project()
+    info = build_support_package(project)
+    project.log(operator, "导出诊断支持包", info["filename"])
+    return {**info, "download_url": f"/api/export/file/{quote(info['filename'])}"}
+
+
 # ───────────────────────── 导入问题汇总 ─────────────────────────
 
 def import_template(_: str = Depends(get_operator)):
@@ -1404,7 +1414,7 @@ def download_export(filename: str, _: str = Depends(get_operator)):
     out_resolved = (proj.root / OUT_DIR).resolve()
     p = (out_resolved / unquote(filename)).resolve()
     # 防目录穿越：必须落在输出目录内
-    if p.parent != out_resolved or p.suffix.lower() not in {".csv", ".xlsx", ".zip", ".txt"}:
+    if p.parent != out_resolved or p.suffix.lower() not in {".csv", ".json", ".xlsx", ".zip", ".txt"}:
         raise HTTPException(status_code=400, detail="非法文件名")
     if not p.is_file():
         raise HTTPException(status_code=404, detail="文件不存在（可能已被移动）")
@@ -1496,6 +1506,7 @@ app.include_router(build_operations_router(
     get_operator,
     list_logs,
     export_audit_logs,
+    export_diagnostics_support_package,
     import_template,
     import_excel,
     import_merge,

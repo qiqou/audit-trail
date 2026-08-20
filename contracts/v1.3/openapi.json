@@ -1318,6 +1318,45 @@
         "summary": "Save Backup Settings"
       }
     },
+    "/api/diagnostics/support-package": {
+      "post": {
+        "description": "生成默认剔除业务内容和路径的本机诊断支持包。",
+        "operationId": "export_diagnostics_support_package_api_diagnostics_support_package_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-session",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Session",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export Diagnostics Support Package"
+      }
+    },
     "/api/exchanges/{session_uuid}": {
       "get": {
         "operationId": "get_issue_exchange_api_exchanges__session_uuid__get",

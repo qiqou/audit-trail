@@ -574,6 +574,24 @@ async function exportLogs(): Promise<void> {
   }
 }
 
+async function exportDiagnosticsSupportPackage(): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      "诊断包不含项目名称、人员、底稿正文、附件名称、路径或附件内容。仅在需要技术支持时手动导出。",
+      "生成诊断支持包",
+      { confirmButtonText: "生成并下载", cancelButtonText: "取消", type: "info" },
+    );
+    working.value = true;
+    const result = await api.exportDiagnosticsSupportPackage();
+    window.open(result.download_url, "_blank", "noopener,noreferrer");
+    ElMessage.success("诊断支持包已生成");
+  } catch (error) {
+    if (error !== "cancel") report(error);
+  } finally {
+    working.value = false;
+  }
+}
+
 async function openRecycle(): Promise<void> {
   show("recycle");
   recycledIssues.value = [];
@@ -1276,7 +1294,7 @@ async function resetProject(): Promise<void> {
       </div>
 
       <div v-else-if="activePanel === 'logs'" class="operation-panel">
-        <div class="panel-head"><p>记录本项目内的新增、修改、导入、导出与状态流转操作。</p><span><el-button size="small" @click="openLogs">刷新</el-button><el-button size="small" :loading="working" @click="exportLogs">导出 CSV</el-button></span></div>
+        <div class="panel-head"><p>记录本项目内的新增、修改、导入、导出与状态流转操作。</p><span><el-button size="small" @click="openLogs">刷新</el-button><el-button size="small" :loading="working" @click="exportLogs">导出 CSV</el-button><el-button size="small" :loading="working" @click="exportDiagnosticsSupportPackage">诊断支持包</el-button></span></div>
         <div class="tool-options"><el-input v-model="logActor" size="small" clearable placeholder="经办人" /><el-input v-model="logAction" size="small" clearable placeholder="操作类型" /><input v-model="logStartDate" type="date" aria-label="操作日志起始日期" /><span>至</span><input v-model="logEndDate" type="date" aria-label="操作日志结束日期" /><el-button size="small" @click="openLogs">筛选</el-button></div>
         <el-empty v-if="!logs.length" description="暂无操作日志" :image-size="58" />
         <div v-else class="log-list"><div v-for="entry in logs" :key="entry.id" class="log-row"><time>{{ entry.created_at }}</time><strong>{{ entry.operator }}</strong><span>{{ entry.action }}</span><span>{{ entry.target }}</span><small>{{ entry.detail }}</small></div></div>
