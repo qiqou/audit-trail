@@ -1094,6 +1094,16 @@ class AuditProject:
         """在迁移前创建 audit.db 的一致性快照，返回相对项目根目录的路径。"""
         return create_snapshot(self._conn, self.root, SNAPSHOT_DIR, source_version)
 
+    def _reopen_connection_after_swap(self) -> None:
+        """原子导入/合并替换 audit.db 后重建受锁保护的连接与读取仓储。"""
+        self._conn = _SerializedConnection(
+            sqlite3.connect(self.db_path, check_same_thread=False), self._lock,
+        )
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA foreign_keys = ON")
+        self._conn.execute("PRAGMA busy_timeout = 5000")
+        self._units = UnitRepository(self._conn)
+
     def close(self):
         self._conn.close()
 

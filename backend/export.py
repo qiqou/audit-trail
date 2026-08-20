@@ -1800,8 +1800,6 @@ def _clone_project_for_merge(proj: AuditProject, stage_root: Path) -> AuditProje
 
 def _replace_project_from_merge_stage(proj: AuditProject, stage: AuditProject) -> None:
     """用已验证的暂存项目替换正式数据库和附件库，并在失败时恢复原项目。"""
-    import sqlite3
-
     stage_root = stage.root
     stage.close()
     target_db = proj.db_path
@@ -1843,13 +1841,7 @@ def _replace_project_from_merge_stage(proj: AuditProject, stage: AuditProject) -
             raise
         finally:
             proj._swapping = False
-            proj._conn = sqlite3.connect(proj.db_path, check_same_thread=False)
-            proj._conn.row_factory = sqlite3.Row
-            proj._conn.execute("PRAGMA foreign_keys = ON")
-            # 导入/合并原子替换会重建连接；所有读取仓储必须同步绑定新连接。
-            from repositories.units import UnitRepository
-
-            proj._units = UnitRepository(proj._conn)
+            proj._reopen_connection_after_swap()
 
 
 def merge_backups(proj: AuditProject, bak_paths, operator: str) -> dict:
