@@ -3,7 +3,7 @@
 from collections.abc import Callable
 
 from api.dependencies import SessionContext
-from database import AuditProject
+from database import SCHEMA_VERSION, AuditProject
 from fastapi import APIRouter, Depends, HTTPException
 from jobs import JobContext
 
@@ -17,6 +17,21 @@ def build_router(
 ) -> APIRouter:
     """保持扫描任务持久化与项目级查询的 URL、响应结构不变。"""
     router = APIRouter()
+
+    @router.get("/api/meta")
+    def runtime_meta(_: str = Depends(get_operator)):
+        """返回当前离线工作台的 schema 与可用能力，前端不得从错误文本推断功能。"""
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "capabilities": {
+                "draft_recovery": True,
+                "review_notes": True,
+                "unit_ordering": True,
+                "issue_ordering": True,
+                "rich_text_editor": False,
+                "project_material_requests": False,
+            },
+        }
 
     @router.get("/api/project/health")
     def project_health(sample_size: int = 20, _: str = Depends(get_operator)):

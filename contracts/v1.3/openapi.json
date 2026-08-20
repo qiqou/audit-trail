@@ -3763,6 +3763,45 @@
         "summary": "List Logs"
       }
     },
+    "/api/meta": {
+      "get": {
+        "description": "返回当前离线工作台的 schema 与可用能力，前端不得从错误文本推断功能。",
+        "operationId": "runtime_meta_api_meta_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-session",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Session",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Runtime Meta"
+      }
+    },
     "/api/project/create": {
       "post": {
         "operationId": "create_project_api_project_create_post",

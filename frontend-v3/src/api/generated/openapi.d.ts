@@ -936,6 +936,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/meta": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Runtime Meta
+         * @description 返回当前离线工作台的 schema 与可用能力，前端不得从错误文本推断功能。
+         */
+        get: operations["runtime_meta_api_meta_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/project/create": {
         parameters: {
             query?: never;
@@ -4208,6 +4228,37 @@ export interface operations {
             query?: {
                 limit?: number;
             };
+            header?: {
+                "x-session"?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    runtime_meta_api_meta_get: {
+        parameters: {
+            query?: never;
             header?: {
                 "x-session"?: string;
             };
