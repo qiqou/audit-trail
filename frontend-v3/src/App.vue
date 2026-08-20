@@ -13,6 +13,7 @@ import { useThemeStore, type Theme } from "./app/themeStore";
 import { useJobStore } from "./app/jobStore";
 import { createTabLease } from "./app/tabLease";
 import { useReferenceData } from "./features/projectContext/useReferenceData";
+import { useProjectLifecycle, type RecentProject } from "./features/projectContext/useProjectLifecycle";
 import { APP_VERSION_LABEL } from "./version";
 
 // 项目列表/登录页不需要工作区和低频操作面板，打开项目时才加载，缩短首次启动等待。
@@ -28,7 +29,6 @@ const { operator } = storeToRefs(sessionStore);
 const { project, units, departments, categories, issueNumberRule } = storeToRefs(projectStore);
 const { theme } = storeToRefs(themeStore);
 
-type RecentProject = { path: string; name: string; time: number };
 type AutoSaveMode = "realtime" | "5m" | "20m";
 const RECENT_KEY = "audit_recent_projects";
 const AUTO_SAVE_KEY = "audit_auto_save_mode_v3";
@@ -64,10 +64,6 @@ async function refreshRecent(): Promise<void> {
 }
 
 const loginName = ref(operator.value);
-const opening = ref(false);
-const creating = ref(false);
-const projectPath = ref("");
-const projectName = ref("");
 const health = ref<HealthResult | null>(null);
 const healthDialogVisible = ref(false);
 const busy = ref(false);
@@ -155,6 +151,33 @@ function report(error: unknown): void {
 }
 
 const { refreshUnits, refreshDepartments, refreshCategories, refreshIssueNumber, refreshAll: refreshProjectReferenceData } = useReferenceData(report);
+const {
+  chooseProjectFolder,
+  chooseRestoreTarget,
+  clearProjectInput,
+  creating,
+  inputRestoreFile,
+  openRecent,
+  openRestoredProject,
+  opening,
+  projectName,
+  projectPath,
+  restoreFile,
+  restoreFromHub,
+  restoreLocalPath,
+  restorePicker,
+  restoreTarget,
+  restoring,
+  setProject,
+} = useProjectLifecycle({
+  project,
+  clearJobs: () => jobStore.clear(),
+  refreshReferenceData: refreshProjectReferenceData,
+  refreshRecent,
+  resetHealth: () => { health.value = null; },
+  report,
+  canLeaveCurrentWorkspace: async () => !workspace.value || workspace.value.confirmCurrentLeave(),
+});
 
 async function forgetRecent(path: string): Promise<void> {
   try {
@@ -209,118 +232,6 @@ async function login(): Promise<void> {
   }
 }
 
-async function chooseProjectFolder(): Promise<void> {
-  try {
-    const result = await api.projects.chooseFolder();
-    if (result.path) projectPath.value = result.path;
-    if (result.warning) ElMessage.warning(result.warning);
-  } catch (error) {
-    report(error);
-  }
-}
-
-// 初始界面「从备份恢复项目」：选 .auditbak + 目标目录 → 恢复并打开（复用 openRestoredProject）
-const restorePicker = ref<HTMLInputElement | null>(null);
-const restoreFile = ref<File | null>(null);
-const restoreLocalPath = ref("");
-const restoreTarget = ref("");
-const restoring = ref(false);
-
-async function chooseRestoreTarget(): Promise<void> {
-  try {
-    const result = await api.projects.chooseFolder();
-    if (result.path) restoreTarget.value = result.path;
-    if (result.warning) ElMessage.warning(result.warning);
-  } catch (error) {
-    report(error);
-  }
-}
-
-function inputRestoreFile(event: Event): void {
-  const file = (event.target as HTMLInputElement).files?.[0];
-  restoreFile.value = file ?? null;
-}
-
-async function restoreFromHub(): Promise<void> {
-  // Element Plus 的 loading 状态需要一次渲染才会反映到按钮；这里先在逻辑层
-  // 拦截，避免双击或重复确认发出两次恢复请求。第二次请求会在首个恢复已落盘后
-  // 被后端正确地当作“同名项目已存在”，但对使用人来说会误以为本次恢复失败。
-  if (restoring.value) return;
-  const localPath = restoreLocalPath.value.trim();
-  if (!restoreFile.value && !localPath) {
-    ElMessage.warning("请选择 .auditbak 文件，或输入本机备份文件完整路径");
-    return;
-  }
-  if (!restoreTarget.value.trim()) {
-    ElMessage.warning("请选择或输入恢复目标目录");
-    return;
-  }
-  try {
-    await ElMessageBox.confirm(
-      "恢复会写入目标文件夹；目标必须为空或不存在。恢复后目录自动加 .auditproj 后缀并隐藏。",
-      "恢复项目备份",
-      { type: "warning", confirmButtonText: "恢复并打开", cancelButtonText: "取消" },
-    );
-  } catch {
-    return; // 用户取消
-  }
-  if (restoring.value) return;
-  restoring.value = true;
-  try {
-    const result = localPath
-      ? await api.restoreLocalBackup(localPath, restoreTarget.value.trim())
-      : await api.restoreBackup(restoreFile.value!, restoreTarget.value.trim());
-    if (await openRestoredProject(result.path)) {
-      ElMessage.success("备份已恢复并打开项目");
-    } else {
-      ElMessage.warning(`备份已恢复至「${result.path}」，但未能自动打开；请从最近项目中再次打开该项目。`);
-    }
-  } catch (error) {
-    report(error);
-  } finally {
-    restoring.value = false;
-  }
-}
-
-async function setProject(action: "open" | "create"): Promise<void> {
-  if (!projectPath.value.trim()) {
-    ElMessage.warning("请选择或输入项目文件夹");
-    return;
-  }
-  opening.value = action === "open";
-  creating.value = action === "create";
-  try {
-    project.value = action === "open"
-      ? await api.projects.openProject(projectPath.value.trim())
-      : await api.projects.createProject(projectPath.value.trim(), projectName.value.trim());
-    jobStore.clear();
-    await refreshProjectReferenceData();
-    await refreshRecent(); // 后端打开/创建时已自动记录
-    health.value = null;
-    ElMessage.success(action === "open" ? "项目已打开" : "项目已创建");
-  } catch (error) {
-    report(error);
-  } finally {
-    opening.value = false;
-    creating.value = false;
-  }
-}
-
-async function openRecent(recent: RecentProject): Promise<void> {
-  opening.value = true;
-  try {
-    project.value = await api.projects.openProject(recent.path);
-    jobStore.clear();
-    await refreshProjectReferenceData();
-    await refreshRecent(); // 后端打开时已自动更新记录时间
-    health.value = null;
-    ElMessage.success(`已打开“${project.value.project_name}”`);
-  } catch (error) {
-    report(error);
-  } finally {
-    opening.value = false;
-  }
-}
 
 function departmentsSaved(values: string[]): void {
   departments.value = [...values];
@@ -344,22 +255,6 @@ async function runHealthCheck(): Promise<void> {
     report(error);
   } finally {
     busy.value = false;
-  }
-}
-
-async function openRestoredProject(path: string): Promise<boolean> {
-  // 恢复已产生新项目，但切换打开前仍须保护当前编辑中的底稿。
-  if (workspace.value && !(await workspace.value.confirmCurrentLeave())) return false;
-  try {
-    project.value = await api.projects.openProject(path);
-    jobStore.clear();
-    await refreshProjectReferenceData();
-    await refreshRecent(); // 后端打开时已自动记录
-    health.value = null;
-    return true;
-  } catch (error) {
-    report(error);
-    return false;
   }
 }
 
@@ -393,8 +288,7 @@ async function backToProjectList(force = false): Promise<void> {
   projectStore.clear();
   jobStore.clear();
   health.value = null;
-  projectPath.value = "";
-  projectName.value = "";
+  clearProjectInput();
 }
 
 function autoSaveModeChanged(mode: AutoSaveMode): void {
