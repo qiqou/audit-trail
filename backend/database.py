@@ -25,7 +25,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath
 from typing import ClassVar
 
-from db.migration_runner import create_snapshot, preflight_database
+from db.migration_runner import prepare_schema_migration, record_schema_migration
 from domain.errors import ConflictError
 from domain.issue_workflow import (
     ISSUE_STATUSES,
@@ -277,31 +277,10 @@ class AuditProject:
         这比直接复制正在使用的 audit.db 更可靠，也给现场项目保留了可回退点。
         """
         with self._lock:
-            self._conn.execute(
-                "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT DEFAULT '')"
+            migration = prepare_schema_migration(
+                self._conn, self.root, schema_version_key=SCHEMA_VERSION_KEY,
+                target_version=SCHEMA_VERSION, snapshot_dir=SNAPSHOT_DIR,
             )
-            cur = self._conn.execute(
-                "SELECT value FROM meta WHERE key=?", (SCHEMA_VERSION_KEY,)
-            ).fetchone()
-            try:
-                old_version = int(cur["value"]) if cur is not None else 0
-            except (TypeError, ValueError):
-                old_version = 0
-            if old_version > SCHEMA_VERSION:
-                raise ValueError(
-                    f"项目数据由更新版本（schema v{old_version}）创建，当前程序仅支持 v{SCHEMA_VERSION}。"
-                    "请升级审迹后再打开此项目；如需回退，请先备份 .auditbak"
-                )
-            # 新建项目不需要快照；存在业务表但没有版本号的历史项目需要。
-            has_legacy_data = self._conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT IN ('meta', 'sqlite_sequence') LIMIT 1"
-            ).fetchone() is not None
-            needs_snapshot = old_version < SCHEMA_VERSION and (old_version > 0 or has_legacy_data)
-            if needs_snapshot:
-                problems = preflight_database(self._conn)
-                if problems:
-                    raise ValueError("项目迁移预检未通过：" + "；".join(problems) + "。请从可信备份恢复后再升级。")
-            backup_rel_path = self._create_migration_snapshot(old_version) if needs_snapshot else ""
 
         with self._lock, self._conn:
             self._conn.executescript(
@@ -704,13 +683,9 @@ class AuditProject:
         # 迁移。新项目已在上方 CREATE TABLE 中直接得到约束。
         self._rebuild_relational_tables_if_needed()
         with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
-                (SCHEMA_VERSION_KEY, str(SCHEMA_VERSION)),
-            )
-            self._conn.execute(
-                "INSERT OR IGNORE INTO schema_migrations(version, applied_at, backup_rel_path) VALUES(?,?,?)",
-                (SCHEMA_VERSION, _now(), backup_rel_path),
+            record_schema_migration(
+                self._conn, schema_version_key=SCHEMA_VERSION_KEY, target_version=SCHEMA_VERSION,
+                applied_at=_now(), backup_rel_path=migration.backup_rel_path,
             )
 
     def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
@@ -1095,10 +1070,6 @@ class AuditProject:
                     raise ValueError("项目关系约束迁移校验失败，已回滚")
         finally:
             self._conn.execute("PRAGMA foreign_keys = ON")
-
-    def _create_migration_snapshot(self, source_version: int) -> str:
-        """在迁移前创建 audit.db 的一致性快照，返回相对项目根目录的路径。"""
-        return create_snapshot(self._conn, self.root, SNAPSHOT_DIR, source_version)
 
     def _reopen_connection_after_swap(self) -> None:
         """原子导入/合并替换 audit.db 后重建受锁保护的连接与读取仓储。"""
