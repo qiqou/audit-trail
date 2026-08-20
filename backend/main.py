@@ -68,9 +68,11 @@ from routers.evidence_links import build_router as build_evidence_links_router
 from routers.evidence_operations import build_router as build_evidence_operations_router
 from routers.exchanges import build_router as build_exchanges_router
 from routers.issues import build_router as build_issues_router
+from routers.operations import build_router as build_operations_router
 from routers.project_runtime import build_router as build_project_runtime_router
 from routers.projects import build_router as build_projects_router
 from routers.recycle import build_router as build_recycle_router
+from routers.sessions import build_router as build_sessions_router
 from routers.settings import build_router as build_settings_router
 from routers.units import build_router as build_units_router
 from runtime_log import log_runtime_event
@@ -169,7 +171,6 @@ async def _audit_session_middleware(request, call_next):
         _ctx_var.reset(context_token)
 
 
-@app.post("/api/session")
 def login(req: OperatorReq):
     """建立本地会话：现场人员姓名为主留痕，OS 账户作为第二道核验。"""
     operator = req.operator.strip()
@@ -194,7 +195,6 @@ def get_operator(x_session: str = Header(default="")) -> str:
     return ctx.operator
 
 
-@app.get("/api/session")
 def current_session(operator: str = Depends(get_operator)):
     """校验浏览器保存的本地会话；服务重启后前端据此重新要求输入使用人。"""
     ctx = _ctx_var.get()
@@ -210,7 +210,6 @@ def current_session(operator: str = Depends(get_operator)):
     return result
 
 
-@app.delete("/api/session")
 def logout(x_session: str = Header(default="")):
     """显式释放当前会话及其数据库连接，避免频繁切换使用人造成资源累积。"""
     ctx = _sessions.get(x_session.strip())
@@ -221,6 +220,9 @@ def logout(x_session: str = Header(default="")):
     _sessions.pop(x_session.strip(), None)
     _close_session_project(ctx)
     return {"ok": True}
+
+
+app.include_router(build_sessions_router(get_operator, login, current_session, logout))
 
 
 def get_project() -> AuditProject:
@@ -888,14 +890,12 @@ def clear_exclusive(file_id: int, operator: str = Depends(get_operator)):
 
 # ───────────────────────── 操作日志 ─────────────────────────
 
-@app.get("/api/logs")
 def list_logs(limit: int = 500, _: str = Depends(get_operator)):
     return get_project().list_logs(max(1, min(limit, 5000)))
 
 
 # ───────────────────────── 导入问题汇总 ─────────────────────────
 
-@app.get("/api/import/template")
 def import_template(_: str = Depends(get_operator)):
     """下载导入模板 xlsx。"""
     import tempfile
@@ -913,7 +913,6 @@ def import_template(_: str = Depends(get_operator)):
     )
 
 
-@app.post("/api/import/excel")
 async def import_excel(file: UploadFile = File(...), operator: str = Depends(get_operator)):
     """上传整理好的 xlsx，一键导入底稿（单位不存在自动创建）。"""
     import tempfile
@@ -949,7 +948,6 @@ async def import_excel(file: UploadFile = File(...), operator: str = Depends(get
         tmp.unlink(missing_ok=True)
 
 
-@app.post("/api/import/merge")
 async def import_merge(files: list[UploadFile] = File(...),
                        operator: str = Depends(get_operator)):
     """旧上传入口已停用：正式合并需本机路径预检，避免大包限制和绕过冲突确认。"""
@@ -966,7 +964,6 @@ async def import_merge(files: list[UploadFile] = File(...),
     )
 
 
-@app.post("/api/import/merge-local")
 async def import_merge_local(req: LocalMergeReq, operator: str = Depends(get_operator)):
     """通过预检确认后从本机路径合并，适用于 50GB 场景。"""
     from export import merge_backups, merge_preflight
@@ -1016,7 +1013,6 @@ async def import_merge_local(req: LocalMergeReq, operator: str = Depends(get_ope
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@app.post("/api/import/merge-local/preflight")
 async def import_merge_local_preflight(req: LocalMergeReq, _: str = Depends(get_operator)):
     """对本机备份来源做只读预检，发现冲突先展示，确认后才允许写入。"""
     from export import merge_preflight
@@ -1049,7 +1045,6 @@ async def import_merge_local_preflight(req: LocalMergeReq, _: str = Depends(get_
 
 # ───────────────────────── 导出 / 打包 / 备份 ─────────────────────────
 
-@app.post("/api/export/excel")
 def export_excel(req: ExportReq, operator: str = Depends(get_operator)):
     """导出问题汇总表 Excel（unit=当前单位 / project=全部单位）。"""
     from export import export_excel as do_export
@@ -1064,7 +1059,6 @@ def export_excel(req: ExportReq, operator: str = Depends(get_operator)):
             "count": info["count"], "download_url": f"/api/export/file/{quote(info['filename'])}"}
 
 
-@app.post("/api/export/package")
 def package_project(req: PackageReq, operator: str = Depends(get_operator)):
     """通过归档核对令牌后打包 ZIP；项目变化或核对过期必须重新确认。"""
     from export import archive_preflight
@@ -1118,7 +1112,6 @@ def package_project(req: PackageReq, operator: str = Depends(get_operator)):
             "download_url": f"/api/export/file/{quote(info['filename'])}"}
 
 
-@app.post("/api/export/package/preflight")
 def package_preflight(req: PackageReq, _: str = Depends(get_operator)):
     """生成归档核对清单。无阻断项时发放一次性确认令牌，有效期 10 分钟。"""
     from export import archive_preflight
@@ -1150,7 +1143,6 @@ def package_preflight(req: PackageReq, _: str = Depends(get_operator)):
     return result
 
 
-@app.post("/api/backup/create")
 def create_backup(operator: str = Depends(get_operator)):
     """备份项目（audit.db + 附件库）到上级目录 .auditbak。"""
     from export import create_backup as do_backup
@@ -1169,12 +1161,10 @@ def create_backup(operator: str = Depends(get_operator)):
             "download_url": f"/api/backup/download/{quote(info['filename'])}"}
 
 
-@app.get("/api/backup/settings")
 def get_backup_settings(_: str = Depends(get_operator)):
     return get_project().get_backup_settings()
 
 
-@app.post("/api/backup/settings")
 def save_backup_settings(req: BackupSettingsReq, operator: str = Depends(get_operator)):
     try:
         return get_project().save_backup_settings(
@@ -1186,7 +1176,6 @@ def save_backup_settings(req: BackupSettingsReq, operator: str = Depends(get_ope
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.post("/api/backup/recovery-point")
 def create_auto_recovery_point(operator: str = Depends(get_operator)):
     """手工立即创建一份增量恢复点；仍使用已保存的自动备份目标和空间策略。"""
     proj = get_project()
@@ -1199,7 +1188,6 @@ def create_auto_recovery_point(operator: str = Depends(get_operator)):
     return {"job_id": job["id"], "status": job["status"]}
 
 
-@app.get("/api/backup/recovery-points")
 def list_auto_recovery_points(_: str = Depends(get_operator)):
     """列出当前项目自动备份目标中的可用恢复点。"""
     from export import list_incremental_recovery_points
@@ -1228,7 +1216,6 @@ def _log_restored_project(
         restored.close()
 
 
-@app.post("/api/backup/recovery-points/restore")
 async def restore_auto_recovery_point(req: RecoveryPointRestoreReq, operator: str = Depends(get_operator)):
     """从内容寻址自动备份恢复点恢复；始终写入一个新项目目录。"""
     from export import restore_incremental_recovery_point
@@ -1273,7 +1260,6 @@ async def restore_auto_recovery_point(req: RecoveryPointRestoreReq, operator: st
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@app.get("/api/backup/download/{filename}")
 def download_backup(filename: str, _: str = Depends(get_operator)):
     """下载备份 .auditbak（存放于项目上级目录，不走输出目录端点）。
 
@@ -1290,7 +1276,6 @@ def download_backup(filename: str, _: str = Depends(get_operator)):
     return FileResponse(p, filename=p.name)
 
 
-@app.post("/api/backup/restore")
 async def restore_backup(file: UploadFile = File(...), target_dir: str = Form(...),
                          operator: str = Depends(get_operator)):
     """恢复备份：上传 .auditbak + 目标目录（须为空）。"""
@@ -1341,7 +1326,6 @@ async def restore_backup(file: UploadFile = File(...), target_dir: str = Form(..
     return {"path": info["path"]}
 
 
-@app.post("/api/backup/restore-local")
 async def restore_local_backup(req: LocalBackupRestoreReq, operator: str = Depends(get_operator)):
     """从本机路径恢复完整 .auditbak，避免 50GB 文件经浏览器上传的大小限制。"""
     from export import restore_backup as do_restore
@@ -1376,7 +1360,6 @@ async def restore_local_backup(req: LocalBackupRestoreReq, operator: str = Depen
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@app.get("/api/export/file/{filename}")
 def download_export(filename: str, _: str = Depends(get_operator)):
     """下载输出目录中的导出文件（Excel/ZIP/备份）。"""
     from urllib.parse import unquote
@@ -1393,7 +1376,6 @@ def download_export(filename: str, _: str = Depends(get_operator)):
 
 # ───────────────────────── 系统辅助（平台适配层） ─────────────────────────
 
-@app.post("/api/system/restart")
 def restart_program(_: str = Depends(get_operator)):
     """重启程序：结束当前服务进程并重新拉起（页面卡死/数据异常时自救）。
 
@@ -1433,7 +1415,6 @@ def _do_restart():
         os._exit(0)
 
 
-@app.post("/api/system/quit")
 def quit_program(_: str = Depends(get_operator)):
     """退出程序：关闭所有项目连接（SQLite 干净落盘）后退出进程。
 
@@ -1451,7 +1432,6 @@ def _do_quit():
     os._exit(0)
 
 
-@app.post("/api/system/choose-folder")
 def choose_folder(_: str = Depends(get_operator)):
     """弹系统原生文件夹选择器（平台适配层 choose_folder）。
 
@@ -1466,7 +1446,6 @@ def choose_folder(_: str = Depends(get_operator)):
         return {"path": "", "warning": f"{e}。未修改已输入路径，请直接粘贴项目文件夹完整路径。"}
 
 
-@app.post("/api/system/open-folder")
 def open_folder(req: FolderReq, _: str = Depends(get_operator)):
     """在系统文件管理器中打开指定文件夹（平台适配层 open_path）。"""
     try:
@@ -1474,6 +1453,34 @@ def open_folder(req: FolderReq, _: str = Depends(get_operator)):
     except PlatformError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return {"ok": True}
+
+
+app.include_router(build_operations_router(
+    get_operator,
+    list_logs,
+    import_template,
+    import_excel,
+    import_merge,
+    import_merge_local,
+    import_merge_local_preflight,
+    export_excel,
+    package_project,
+    package_preflight,
+    create_backup,
+    get_backup_settings,
+    save_backup_settings,
+    create_auto_recovery_point,
+    list_auto_recovery_points,
+    restore_auto_recovery_point,
+    download_backup,
+    restore_backup,
+    restore_local_backup,
+    download_export,
+    restart_program,
+    quit_program,
+    choose_folder,
+    open_folder,
+))
 
 
 # ───────────────────────── 静态资源（必须最后挂载） ─────────────────────────
