@@ -38,7 +38,7 @@
 
 ### 方式二：源码运行（开发调试）
 
-需要 Python 3.11+：
+发布构建需要 Python 3.14.6：
 
 ```bash
 git clone https://github.com/qiqou/audit-trail.git

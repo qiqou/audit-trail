@@ -73,7 +73,7 @@ const autoSaveMode = ref<AutoSaveMode>(
     ? storedAutoSaveMode
     : "5m",
 );
-const workspace = ref<{ confirmCurrentLeave: () => Promise<boolean>; hasUnsavedChanges: () => boolean; selectIssueById: (issueId: number) => Promise<void>; selectUnit: (unitId: number) => void; openExchange: () => Promise<void> } | null>(null);
+const workspace = ref<{ confirmCurrentLeave: () => Promise<boolean>; hasUnsavedChanges: () => boolean; selectIssueById: (issueId: number) => Promise<void>; selectUnit: (unitId: number) => void; openExchange: () => Promise<void>; openTemplateDialog: () => Promise<void>; openShortcutSettings: () => void } | null>(null);
 const tabBlocked = ref(false);
 let tabRenewTimer: ReturnType<typeof window.setInterval> | undefined;
 let sessionHeartbeatTimer: ReturnType<typeof window.setInterval> | undefined;
@@ -420,6 +420,14 @@ function handleOpenExchange(): void {
   void workspace.value?.openExchange();
 }
 
+function handleWorkspaceTool(tool: "templates" | "shortcuts"): void {
+  if (tool === "templates") {
+    void workspace.value?.openTemplateDialog();
+    return;
+  }
+  workspace.value?.openShortcutSettings();
+}
+
 async function backToProjectList(force = false): Promise<void> {
   if (!force && workspace.value && !(await workspace.value.confirmCurrentLeave())) return;
   project.value = null;
@@ -529,7 +537,7 @@ onBeforeUnmount(() => {
         <div><p class="eyebrow">AUDIT TRAIL {{ APP_VERSION_LABEL }}</p><h1>{{ project?.project_name || '审迹' }}</h1><p v-if="project" class="topbar-path">{{ project.path }}</p></div>
         <div class="operator">
           <el-button v-if="project" size="small" @click="backToProjectList">◀ 返回项目列表</el-button>
-          <ProjectOperations v-if="project" :units="units" :departments="departments" :categories="categories" :project-name="project.project_name" :auto-save-mode="autoSaveMode" :issue-number-rule="issueNumberRule" @health-check="runHealthCheck" @data-changed="refreshUnits" @departments-changed="departmentsSaved" @categories-changed="categoriesSaved" @auto-save-mode-changed="autoSaveModeChanged" @project-renamed="projectRenamed" @restored="openRestoredProject" @issue-number-changed="issueNumberChanged" @open-issue="handleOpenIssue" @select-unit="handleSelectUnit" @open-exchange="handleOpenExchange" />
+          <ProjectOperations v-if="project" :units="units" :departments="departments" :categories="categories" :project-name="project.project_name" :auto-save-mode="autoSaveMode" :issue-number-rule="issueNumberRule" @health-check="runHealthCheck" @data-changed="refreshUnits" @departments-changed="departmentsSaved" @categories-changed="categoriesSaved" @auto-save-mode-changed="autoSaveModeChanged" @project-renamed="projectRenamed" @restored="openRestoredProject" @issue-number-changed="issueNumberChanged" @open-issue="handleOpenIssue" @select-unit="handleSelectUnit" @open-exchange="handleOpenExchange" @open-workspace-tool="handleWorkspaceTool" />
           <span class="theme-switch" aria-label="界面主题">
             <button class="theme-dot" :class="{ active: theme === 'dark' }" title="深色" @click="applyTheme('dark')">🌙</button>
             <button class="theme-dot" :class="{ active: theme === 'light' }" title="浅色" @click="applyTheme('light')">☀️</button>

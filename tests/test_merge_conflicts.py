@@ -182,6 +182,10 @@ def test_merge_preserves_status_versions_and_exclusive_evidence(proj, tmp_path):
     evidence_path.write_bytes(b"%PDF archived evidence")
     evidence = source.add_file(unit_id, evidence_path, "李四")
     source.link_file_exclusive(issue_id, evidence["id"], "李四")
+    request = source.create_project_request(
+        "李四", title="提供发货单", responsible="财务部", due_date="2026-08-31", issue_id=issue_id,
+    )
+    source.update_project_request(request["request_uuid"], "李四", status="provided", provided_file_id=evidence["id"])
     expected_versions = source.list_versions(issue_id)
     backup = _make_backup(source, "完整备份")
 
@@ -199,6 +203,10 @@ def test_merge_preserves_status_versions_and_exclusive_evidence(proj, tmp_path):
     ]
     assert imported_file["exclusive_to"] == imported_issue["id"]
     assert proj.linked_issue_ids_for_file(imported_file["id"]) == [imported_issue["id"]]
+    imported_request = proj.list_project_requests()[0]
+    assert result["requests"] == 1
+    assert imported_request["title"] == "提供发货单" and imported_request["issue_id"] == imported_issue["id"]
+    assert imported_request["provided_file_id"] == imported_file["id"] and imported_request["status"] == "provided"
     assert result["source_logs"] > 0
     assert any(log["action"] == "保留来源操作日志" for log in proj.list_logs())
 

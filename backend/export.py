@@ -1408,7 +1408,7 @@ def _merge_backups_in_place(proj, bak_paths, operator):
     unit_cache = {u["name"]: u["id"] for u in proj.list_units()}
     # T9：合并前的初始单位集合（检测"同名已存在"必须用它，避免把刚创建的单位误判）
     initial_unit_names = set(unit_cache)
-    units = issues = files = folders = depts = versions = source_logs = 0
+    units = issues = files = folders = depts = versions = requests = source_logs = 0
     errors = []
     # T9 冲突清单：合并行为与 v1.1 一致（复用/重排/都保留/去重合并），
     # 但把每一处"冲突被正确处理"的情况报告出来，供审计经理核对。
@@ -1605,6 +1605,41 @@ def _merge_backups_in_place(proj, bak_paths, operator):
                     except (KeyError, ValueError) as exc:
                         errors.append(f"{Path(zp).name}：附件 {bf['id']} 独占关系导入失败：{exc}")
 
+                # 项目级资料请求与底稿、单位、附件一同迁移。来源为旧版本时表不存在，
+                # 跳过即可；来源 UUID 与当前项目冲突则生成新的本地 UUID，避免覆盖历史。
+                try:
+                    source_requests = conn.execute("SELECT * FROM project_requests ORDER BY created_at, request_uuid").fetchall()
+                except sqlite3.OperationalError:
+                    source_requests = []
+                for source_request in source_requests:
+                    request = dict(source_request)
+                    request_uuid = str(request.get("request_uuid") or uuid.uuid4())
+                    if proj._conn.execute(
+                        "SELECT 1 FROM project_requests WHERE request_uuid=?", (request_uuid,)
+                    ).fetchone():
+                        request_uuid = str(uuid.uuid4())
+                    status = str(request.get("status") or "open")
+                    if status not in {"open", "provided", "verified", "withdrawn"}:
+                        errors.append(f"{Path(zp).name}：资料请求 {request.get('title', '')} 状态无效，已按待提供导入")
+                        status = "open"
+                    with proj._lock, proj._conn:
+                        proj._conn.execute(
+                            "INSERT INTO project_requests(request_uuid,unit_id,issue_id,title,detail,responsible,due_date,status,provided_file_id,note,created_by,created_at,updated_by,updated_at) "
+                            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (
+                                request_uuid,
+                                unit_map.get(request.get("unit_id")) if request.get("unit_id") is not None else None,
+                                issue_map.get(request.get("issue_id")) if request.get("issue_id") is not None else None,
+                                str(request.get("title") or "未命名资料请求"), str(request.get("detail") or ""),
+                                str(request.get("responsible") or ""), str(request.get("due_date") or ""), status,
+                                file_map.get(request.get("provided_file_id")) if request.get("provided_file_id") is not None else None,
+                                str(request.get("note") or ""), str(request.get("created_by") or operator),
+                                str(request.get("created_at") or _now()), str(request.get("updated_by") or operator),
+                                str(request.get("updated_at") or request.get("created_at") or _now()),
+                            ),
+                        )
+                    requests += 1
+
                 # 版块预设合并
                 try:
                     meta = conn.execute("SELECT value FROM meta WHERE key='departments'").fetchone()
@@ -1690,11 +1725,11 @@ def _merge_backups_in_place(proj, bak_paths, operator):
 
     batch_uuid = proj.record_merge_batch(operator, [str(Path(path).resolve()) for path in bak_paths], conflicts)
     proj.log(operator, "合并导入备份",
-             f"单位 {units} 个、底稿 {issues} 条、版本 {versions} 个、附件 {files} 个、文件夹 {folders} 个、版块预设 {depts} 个"
+             f"单位 {units} 个、底稿 {issues} 条、版本 {versions} 个、附件 {files} 个、文件夹 {folders} 个、资料请求 {requests} 条、版块预设 {depts} 个"
              + (f"、来源日志 {source_logs} 条" if source_logs else "")
              + (f"、冲突 {len(conflicts)} 处" if conflicts else "")
              + f"；批次 {batch_uuid}")
-    return {"units": units, "issues": issues, "files": files,
+    return {"units": units, "issues": issues, "files": files, "requests": requests,
             "folders": folders, "depts": depts, "versions": versions, "errors": errors[:30],
             "conflicts": conflicts, "source_logs": source_logs, "batch_uuid": batch_uuid}
 

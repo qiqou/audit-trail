@@ -2,14 +2,18 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import { api, type Issue, type IssueChanges, type IssueStatus } from "../api/client";
+import { api, type Issue, type IssueChanges, type IssuePatch, type IssueStatus, type Unit } from "../api/client";
 import { formatIssueNo } from "../format";
 import VersionHistory from "./VersionHistory.vue";
 
 type AutoSaveMode = "realtime" | "5m" | "20m";
+type PlainIssueDraft = Required<Pick<IssueChanges,
+  "department" | "category" | "defect_type" | "defect_desc" | "amount" | "regulation_basis" | "suggestion" | "author" | "reviewer"
+>> & { currency: string; amount_unit: string };
 
 const props = defineProps<{
   issue: Issue;
+  units: Unit[];
   departments: string[];
   categories: string[];
   autoSaveMode: AutoSaveMode;
@@ -18,12 +22,16 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{
   updated: [issue: Issue];
+  copied: [issue: Issue];
   deleteRequested: [issue: Issue];
   discarded: [issueId: number];
 }>();
 
 const saving = ref(false);
-const draft = reactive<IssueChanges>({
+const duplicateVisible = ref(false);
+const duplicateTargetUnitId = ref<number | null>(null);
+const versionHistory = ref<{ open: () => Promise<void> } | null>(null);
+const draft = reactive<PlainIssueDraft>({
   department: "", category: "", defect_type: "", defect_desc: "", amount: "", currency: "CNY", amount_unit: "元", regulation_basis: "", suggestion: "", author: "", reviewer: "",
 });
 const savedSignature = ref("");
@@ -67,8 +75,8 @@ const amountFreeTextHint = computed(() =>
   amountIsStructured.value ? "" : "金额为自由文本时不可修改币种/单位，请先将金额改为数字",
 );
 
-function draftValues(): IssueChanges {
-  const values: IssueChanges = {
+function draftValues(): IssuePatch {
+  const values: IssuePatch = {
     department: draft.department, category: draft.category, defect_type: draft.defect_type, defect_desc: draft.defect_desc,
     amount: draft.amount, regulation_basis: draft.regulation_basis, suggestion: draft.suggestion,
     author: draft.author, reviewer: draft.reviewer,
@@ -172,6 +180,58 @@ async function save(): Promise<void> {
   await persist(true);
 }
 
+async function openDuplicateDialog(): Promise<void> {
+  if (saving.value) return;
+  // 复制必须以当前正式内容为准，不能让用户误以为未保存输入已被带入新稿。
+  if (!(await persist(false))) return;
+  duplicateTargetUnitId.value = props.issue.unit_id;
+  duplicateVisible.value = true;
+}
+
+async function duplicate(): Promise<void> {
+  if (!duplicateTargetUnitId.value || saving.value) return;
+  saving.value = true;
+  try {
+    const copied = await api.duplicateIssue(props.issue.id, duplicateTargetUnitId.value);
+    emit("copied", copied);
+    duplicateVisible.value = false;
+    const targetUnit = props.units.find((unit) => unit.id === copied.unit_id);
+    ElMessage.success(`已复制为“${targetUnit?.name ?? "目标单位"}”的新草稿；附件、版本、状态和交流记录未复制`);
+  } catch (error) {
+    ElMessage.error(errorMessage(error));
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function saveAsTemplate(): Promise<void> {
+  if (saving.value) return;
+  if (!(await persist(false))) return;
+  try {
+    const result = await ElMessageBox.prompt(
+      "模板会保存底稿的版块、分类、正文、金额、制度依据和审计建议；不保存编制人、审核人、状态、附件、版本或交流记录。",
+      "保存为项目内模板",
+      {
+        inputPlaceholder: props.issue.defect_type || "例如：收入截止测试问题",
+        inputValidator: (value) => Boolean(value?.trim()) || "模板名称不能为空",
+        confirmButtonText: "保存模板",
+        cancelButtonText: "取消",
+      },
+    );
+    saving.value = true;
+    await api.createWorkpaperTemplate(result.value.trim(), props.issue.id);
+    ElMessage.success("底稿模板已保存，可在问题列表的“模板”入口按单位新建");
+  } catch (error) {
+    if (error !== "cancel" && error !== "close") ElMessage.error(errorMessage(error));
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function openVersionHistory(): Promise<void> {
+  await versionHistory.value?.open();
+}
+
 async function prepareVersionRestore(): Promise<boolean> {
   return persist(false);
 }
@@ -262,7 +322,7 @@ function hasUnsavedChanges(): boolean {
   return dirty.value || (props.isNew && missingRequired.value.length > 0);
 }
 
-defineExpose({ confirmLeave, hasUnsavedChanges });
+defineExpose({ confirmLeave, hasUnsavedChanges, openDuplicateDialog, openVersionHistory, saveAsTemplate });
 </script>
 
 <template>
@@ -287,14 +347,28 @@ defineExpose({ confirmLeave, hasUnsavedChanges });
       </label>
       <label>问题分类<el-select v-model="draft.category" :disabled="isArchived" filterable allow-create default-first-option clearable placeholder="选择或输入分类"><el-option v-for="category in categories" :key="category" :label="category" :value="category" /></el-select></label>
     </div>
-    <label class="field">缺陷描述<el-input v-model="draft.defect_desc" :disabled="isArchived" type="textarea" :autosize="{ minRows: 5, maxRows: 50 }" /></label>
-    <label class="field">制度依据<el-input v-model="draft.regulation_basis" :disabled="isArchived" type="textarea" :autosize="{ minRows: 4, maxRows: 50 }" /></label>
-    <label class="field">审计建议<el-input v-model="draft.suggestion" :disabled="isArchived" type="textarea" :autosize="{ minRows: 4, maxRows: 50 }" /></label>
+    <label class="field">缺陷描述<el-input v-model="draft.defect_desc" :disabled="isArchived" type="textarea" :autosize="{ minRows: 6, maxRows: 14 }" placeholder="请输入缺陷描述" /></label>
+    <label class="field">制度依据<el-input v-model="draft.regulation_basis" :disabled="isArchived" type="textarea" :autosize="{ minRows: 4, maxRows: 10 }" placeholder="请输入制度依据" /></label>
+    <label class="field">审计建议<el-input v-model="draft.suggestion" :disabled="isArchived" type="textarea" :autosize="{ minRows: 4, maxRows: 10 }" placeholder="请输入审计建议" /></label>
     <div class="form-grid author-reviewer"><label>编制人<el-input v-model="draft.author" :disabled="isArchived" /></label><label>审核人<el-input v-model="draft.reviewer" :disabled="isArchived" /></label></div>
     <div class="editor-footer">
       <span :class="{ 'editor-dirty': dirty }">{{ saveStateText }}</span>
-      <div class="editor-footer-actions"><VersionHistory :issue="issue" :before-restore="prepareVersionRestore" @restored="(fresh) => emit('updated', fresh)" /><span class="status-actions footer-status-actions"><el-button v-for="target in allowed" :key="target" size="small" :loading="saving" :type="target === '已归档' ? 'info' : target === '已复核' ? 'success' : target === '复核退回' ? 'warning' : 'primary'" @click="transition(target)">{{ issue.status === '已归档' && target === '编制完成' ? '归档后编辑' : target }}</el-button></span><el-button size="small" type="danger" plain :loading="saving" @click="emit('deleteRequested', issue)">移入回收站</el-button><el-button size="small" type="primary" :disabled="isArchived" :loading="saving" @click="save">保存</el-button></div>
+      <div class="editor-footer-actions"><VersionHistory ref="versionHistory" :issue="issue" :before-restore="prepareVersionRestore" :trigger-visible="false" @restored="(fresh) => emit('updated', fresh)" /><span class="status-actions footer-status-actions"><el-button v-for="target in allowed" :key="target" size="small" :loading="saving" :type="target === '已归档' ? 'info' : target === '已复核' ? 'success' : target === '复核退回' ? 'warning' : 'primary'" @click="transition(target)">{{ issue.status === '已归档' && target === '编制完成' ? '归档后编辑' : target }}</el-button></span><el-button size="small" type="primary" :disabled="isArchived" :loading="saving" @click="save">保存</el-button></div>
     </div>
+    <el-dialog v-model="duplicateVisible" title="复制为新底稿" width="min(480px, calc(100vw - 32px))" append-to-body>
+      <div class="duplicate-panel">
+        <p>将复制当前底稿的正文和元数据为新草稿。可选择任意被审计单位；附件、版本、状态和交流记录不会复制。</p>
+        <label>目标被审计单位
+          <el-select v-model="duplicateTargetUnitId" filterable placeholder="请选择目标单位">
+            <el-option v-for="unit in units" :key="unit.id" :label="unit.id === issue.unit_id ? `${unit.name}（当前单位）` : unit.name" :value="unit.id" />
+          </el-select>
+        </label>
+      </div>
+      <template #footer>
+        <el-button :disabled="saving" @click="duplicateVisible = false">取消</el-button>
+        <el-button type="primary" :disabled="!duplicateTargetUnitId" :loading="saving" @click="duplicate">复制并打开新底稿</el-button>
+      </template>
+    </el-dialog>
   </article>
 </template>
 
@@ -310,6 +384,24 @@ defineExpose({ confirmLeave, hasUnsavedChanges });
   font-size: 12px;
   color: var(--el-color-warning, #e6a23c);
   line-height: 1.4;
+}
+
+.duplicate-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.duplicate-panel p {
+  margin: 0;
+  color: var(--el-text-color-regular);
+  line-height: 1.6;
+}
+
+.duplicate-panel label {
+  display: grid;
+  gap: 6px;
+  color: var(--el-text-color-regular);
+  font-size: 14px;
 }
 
 @media (max-width: 760px) {

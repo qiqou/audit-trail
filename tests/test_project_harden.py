@@ -51,8 +51,9 @@ def test_create_project_appends_ext_and_hides(client, tmp_path):
     created = Path(r.json()["path"])
     assert created.name == "2026专项审计" + PROJECT_EXT, f"目录名应追加 {PROJECT_EXT}：{created}"
     assert created.is_dir()
-    # 主防线：隐藏属性已设置（macOS/Windows 断言各自平台标志）
-    assert _is_hidden(created), f"项目目录应已隐藏：{created}"
+    # 主防线：隐藏属性已设置（macOS/Windows 断言各自平台标志；Linux 无隐藏概念跳过）
+    if sys.platform in ("darwin", "win32"):
+        assert _is_hidden(created), f"项目目录应已隐藏：{created}"
     if sys.platform != "win32":
         assert created.stat().st_mode & 0o777 == 0o700
         assert (created / "audit.db").stat().st_mode & 0o777 == 0o600
@@ -223,7 +224,8 @@ def test_restore_backup_appends_ext_and_hides(client, tmp_path):
     assert restored.name == "恢复项目" + PROJECT_EXT
     assert restored.is_dir()
     assert not target.exists(), "原路径不应残留（只产生伪装目录）"
-    assert _is_hidden(restored), "恢复的项目目录应已隐藏"
+    if sys.platform in ("darwin", "win32"):
+        assert _is_hidden(restored), "恢复的项目目录应已隐藏"
     # 打开接口按不带后缀路径自动补后缀
     t2 = _login(client, "复核员")
     r2 = client.post("/api/project/open", json={"path": str(target)}, headers=_h(t2))

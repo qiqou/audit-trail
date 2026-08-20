@@ -530,6 +530,34 @@ def test_folder_upload_reuses_streaming_member_digests(client, tmp_path, monkeyp
     assert response.json()["mime"] == "folder"
 
 
+def test_folder_upload_does_not_misreport_finder_metadata_as_content_change(client, tmp_path):
+    """粘贴/拖入文件夹附带 .DS_Store 时，预检摘要须与落盘摘要保持一致。"""
+    token = _login(client, "张三")
+    headers = _headers(token)
+    client.post("/api/project/create", json={"path": str(tmp_path / "项目A"), "name": "项目A"}, headers=headers)
+    unit_id = client.post("/api/units", json={"name": "单位A"}, headers=headers).json()["id"]
+
+    def upload_folder():
+        return client.post(
+            f"/api/units/{unit_id}/folder-upload",
+            data={"folder_name": "合同资料"},
+            files=[
+                ("files", (".DS_Store", b"finder metadata", "application/octet-stream")),
+                ("files", ("子目录/证据.txt", b"audit evidence", "text/plain")),
+            ],
+            headers=headers,
+        )
+
+    first = upload_folder()
+    assert first.status_code == 200
+    assert first.json()["mime"] == "folder"
+
+    # 同一业务文件夹再次导入仍应按业务内容复用，不应因系统元数据触发摘要不一致。
+    repeated = upload_folder()
+    assert repeated.status_code == 200
+    assert repeated.json()["duplicated"] is True
+
+
 def test_global_search_finds_units_issues_files(client, tmp_path):
     """全局搜索：单位/底稿/附件按关键字模糊匹配。"""
     token = _login(client, "张三")
@@ -572,6 +600,75 @@ def test_summary_includes_issue_list(client, tmp_path):
     first = data["issues"][0]
     assert first["unit_name"] == "单位A" and first["defect_type"] == "问题A"
     assert first["amount"] == "100" and first["status"] == "草稿" and "file_count" in first
+
+
+def test_duplicate_issue_api_creates_plain_text_draft(client, tmp_path):
+    token = _login(client, "张三")
+    headers = _headers(token)
+    client.post("/api/project/create", json={"path": str(tmp_path / "复制项目"), "name": "复制项目"}, headers=headers)
+    unit_id = client.post("/api/units", json={"name": "单位A"}, headers=headers).json()["id"]
+    target_unit_id = client.post("/api/units", json={"name": "单位B"}, headers=headers).json()["id"]
+    source_id = client.post(
+        f"/api/units/{unit_id}/issues", json={"department": "财务", "defect_type": "问题A", "defect_desc": "原始正文"}, headers=headers,
+    ).json()["id"]
+
+    response = client.post(f"/api/issues/{source_id}/duplicate", json={"unit_id": target_unit_id}, headers=headers)
+
+    assert response.status_code == 200
+    copied = response.json()
+    assert copied["id"] != source_id and copied["unit_id"] == target_unit_id and copied["status"] == "草稿"
+    assert copied["defect_desc"] == "原始正文" and copied["defect_desc_rich"] == ""
+
+
+def test_workpaper_template_api_is_project_scoped_and_creates_clean_draft(client, tmp_path):
+    token = _login(client, "张三")
+    headers = _headers(token)
+    client.post("/api/project/create", json={"path": str(tmp_path / "模板项目"), "name": "模板项目"}, headers=headers)
+    unit_a = client.post("/api/units", json={"name": "单位A"}, headers=headers).json()["id"]
+    unit_b = client.post("/api/units", json={"name": "单位B"}, headers=headers).json()["id"]
+    issue_id = client.post(
+        f"/api/units/{unit_a}/issues",
+        json={"department": "采购", "defect_type": "供应商核查", "defect_desc": "核查说明", "author": "原编制人"},
+        headers=headers,
+    ).json()["id"]
+
+    created = client.post("/api/workpaper-templates", json={"name": "供应商核查模板", "issue_id": issue_id}, headers=headers)
+    assert created.status_code == 200
+    template = created.json()
+    assert template["data"]["defect_type"] == "供应商核查"
+    assert "author" not in template["data"]
+    assert client.get("/api/workpaper-templates", headers=headers).json()[0]["id"] == template["id"]
+
+    applied = client.post(f"/api/workpaper-templates/{template['id']}/apply", json={"unit_id": unit_b}, headers=headers)
+    assert applied.status_code == 200
+    copied = applied.json()
+    assert copied["unit_id"] == unit_b and copied["status"] == "草稿"
+    assert copied["defect_desc"] == "核查说明" and copied["author"] == "张三" and copied["reviewer"] == ""
+    assert client.delete(f"/api/workpaper-templates/{template['id']}", headers=headers).status_code == 200
+    assert client.post(f"/api/workpaper-templates/{template['id']}/apply", json={"unit_id": unit_b}, headers=headers).status_code == 404
+
+
+def test_batch_issue_metadata_api_requires_fresh_confirmation_token(client, tmp_path):
+    token = _login(client, "张三")
+    headers = _headers(token)
+    client.post("/api/project/create", json={"path": str(tmp_path / "批量维护项目"), "name": "批量维护项目"}, headers=headers)
+    unit_id = client.post("/api/units", json={"name": "单位A"}, headers=headers).json()["id"]
+    issue_a = client.post(f"/api/units/{unit_id}/issues", json={"department": "财务", "defect_type": "问题A", "defect_desc": "描述A"}, headers=headers).json()["id"]
+    issue_b = client.post(f"/api/units/{unit_id}/issues", json={"department": "财务", "defect_type": "问题B", "defect_desc": "描述B"}, headers=headers).json()["id"]
+
+    preflight = client.post(
+        "/api/issues/batch-metadata/preflight", json={"issue_ids": [issue_a, issue_b], "changes": {"category": "经营管理"}}, headers=headers,
+    )
+    assert preflight.status_code == 200
+    approved = preflight.json()
+    assert approved["selected"] == 2 and approved["affected"] == 2
+    committed = client.post(
+        "/api/issues/batch-metadata", json={"issue_ids": [issue_a, issue_b], "changes": {"category": "经营管理"}, "confirmation_token": approved["confirmation_token"]}, headers=headers,
+    )
+    assert committed.status_code == 200 and committed.json()["updated"] == 2
+    assert client.post(
+        "/api/issues/batch-metadata", json={"issue_ids": [issue_a, issue_b], "changes": {"category": "经营管理"}, "confirmation_token": approved["confirmation_token"]}, headers=headers,
+    ).status_code == 409
 
 
 def test_system_quit_returns_ok(client, tmp_path, monkeypatch):

@@ -5,7 +5,7 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 #
 # 流程：环境检查 → 虚拟环境 → Python/前端依赖 → 前端构建 → 门禁 → PyInstaller → 清单 → ZIP → 冒烟
-# 固定构建环境：Python 3.11.11、Node.js 22.12.0、pnpm 11.5.0。
+# 固定构建环境：Python 3.14.6、Node.js 24.19.0、pnpm 11.5.0。
 # 构建不提供跳过测试选项；发布包必须通过 ruff + pytest 门禁。
 
 $ErrorActionPreference = 'Stop'
@@ -35,19 +35,19 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Step "[1/7] 检查 Python 环境"
 $py = Get-Command python -ErrorAction SilentlyContinue
 if (-not $py) {
-    Write-Fail "未找到 python 命令。请先安装 Python 3.11：https://www.python.org/downloads/"
+    Write-Fail "未找到 python 命令。请先安装 Python 3.14.6：https://www.python.org/downloads/"
     Write-Host '        安装时务必勾选 "Add python.exe to PATH"，装完重开命令行再运行本脚本。'
     exit 1
 }
 $pyVer = (& python -c "import sys; print('%d.%d' % sys.version_info[:2])").Trim()
 Write-Host "    检测到 Python: $pyVer ($($py.Source))"
-if ($pyVer -ne '3.11') {
-    Write-Fail "需要 Python 3.11.11，当前为 $pyVer。请安装指定版本后重试。"
+if ($pyVer -ne '3.14') {
+    Write-Fail "需要 Python 3.14.6，当前为 $pyVer。请安装指定版本后重试。"
     exit 1
 }
 $pyPatch = (& python -c "import sys; print('.'.join(map(str, sys.version_info[:3])))").Trim()
-if ($pyPatch -ne '3.11.11') {
-    Write-Fail "需要 Python 3.11.11，当前为 $pyPatch。为保证可复现构建，拒绝继续。"
+if ($pyPatch -ne '3.14.6') {
+    Write-Fail "需要 Python 3.14.6，当前为 $pyPatch。为保证可复现构建，拒绝继续。"
     exit 1
 }
 
@@ -80,8 +80,8 @@ if (-not (Test-Path $pyVenv)) {
     Write-Step "[2/7] 使用已有虚拟环境 .venv"
 }
 $venvPatch = (& $pyVenv -c "import sys; print('.'.join(map(str, sys.version_info[:3])))").Trim()
-if ($venvPatch -ne '3.11.11') {
-    Write-Fail "现有 .venv 使用 Python $venvPatch，不是锁定的 3.11.11。请删除 .venv 后重新运行本脚本。"
+if ($venvPatch -ne '3.14.6') {
+    Write-Fail "现有 .venv 使用 Python $venvPatch，不是锁定的 3.14.6。请删除 .venv 后重新运行本脚本。"
     exit 1
 }
 
@@ -102,12 +102,12 @@ Write-Ok "依赖就绪"
 Write-Step "[4/7] 构建 V3 前端（pnpm + TypeScript + Vite）"
 $pnpm = Get-Command pnpm -ErrorAction SilentlyContinue
 if (-not $pnpm) {
-    Write-Fail "未找到 pnpm。请先安装 Node.js 22.12.0，再执行：corepack enable；corepack prepare pnpm@11.5.0 --activate"
+    Write-Fail "未找到 pnpm。请先安装 Node.js 24.19.0，再执行：corepack enable；corepack prepare pnpm@11.5.0 --activate"
     exit 1
 }
 $nodeVersion = (& node --version).Trim().TrimStart('v')
-if ($nodeVersion -ne '22.12.0') {
-    Write-Fail "需要 Node.js 22.12.0，当前为 $nodeVersion。为保证可复现构建，拒绝继续。"
+if ($nodeVersion -ne '24.19.0') {
+    Write-Fail "需要 Node.js 24.19.0，当前为 $nodeVersion。为保证可复现构建，拒绝继续。"
     exit 1
 }
 $pnpmVersion = (& pnpm --version).Trim()
@@ -185,7 +185,7 @@ $p = Start-Process -FilePath $exePath -PassThru
 $ok = $false
 $smokeUrl = ""
 $servicePid = $null
-$endpointFile = Join-Path $env:USERPROFILE ".shenji\shenji-v11-upgrade.lock.endpoint.json"
+$endpointFile = Join-Path $env:USERPROFILE ".shenji\audit-trail-v13.lock.endpoint.json"
 for ($i = 0; $i -lt 60; $i++) {
     Start-Sleep -Seconds 1
     if (Test-Path $endpointFile) {

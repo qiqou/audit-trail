@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import { api, type AmountSettings, type ArchivePreflight, type AuditLog, type BackupSettings, type ImportResult, type MergePreflight, type MergeResult, type ProjectInfo, type ProjectSummary, type RecycledFile, type RecycledIssue, type RecycledIssuePreview, type RecycledUnit, type RecoveryPoint, type ScanStatus, type SearchResult, type SummaryIssue, type Unit } from "../api/client";
+import { api, type AmountSettings, type ArchivePreflight, type AuditLog, type BatchIssueMetadataChanges, type BackupSettings, type ImportResult, type MergePreflight, type MergeResult, type ProjectInfo, type ProjectSummary, type RecycledFile, type RecycledIssue, type RecycledIssuePreview, type RecycledUnit, type RecoveryPoint, type ScanStatus, type SearchResult, type SummaryIssue, type Unit } from "../api/client";
 import { formatIssueNo } from "../format";
 
 type AutoSaveMode = "realtime" | "5m" | "20m";
@@ -27,6 +27,7 @@ const emit = defineEmits<{
   openIssue: [issueId: number];
   selectUnit: [unitId: number];
   openExchange: [];
+  openWorkspaceTool: [tool: "templates" | "shortcuts"];
 }>();
 
 type Panel = "" | "import" | "export" | "package" | "backup" | "merge" | "restore" | "settings" | "summary" | "logs" | "scan" | "rename" | "search" | "recycle";
@@ -90,6 +91,10 @@ let searchTimer: ReturnType<typeof window.setTimeout> | undefined;
 const summaryUnitFilter = ref<number | null>(null);
 const summaryStatusFilter = ref("");
 const summaryDepartmentFilter = ref("");
+const summaryEvidenceFilter = ref<"" | "with_evidence" | "without_evidence">("");
+const selectedSummaryIssueIds = ref<number[]>([]);
+const batchMetadataField = ref<keyof BatchIssueMetadataChanges>("department");
+const batchMetadataValue = ref("");
 
 function openSearch(): void {
   show("search");
@@ -152,6 +157,8 @@ const summaryIssues = computed(() => {
     if (summaryUnitFilter.value !== null && issue.unit_id !== summaryUnitFilter.value) return false;
     if (summaryStatusFilter.value && issue.status !== summaryStatusFilter.value) return false;
     if (summaryDepartmentFilter.value !== "" && (issue.department || "") !== summaryDepartmentFilter.value) return false;
+    if (summaryEvidenceFilter.value === "with_evidence" && issue.file_count < 1) return false;
+    if (summaryEvidenceFilter.value === "without_evidence" && issue.file_count > 0) return false;
     return true;
   });
 });
@@ -190,6 +197,10 @@ const summaryDepartments = computed(() => {
   return Array.from(new Set(summary.value.issues.map((issue) => issue.department || "")));
 });
 
+const summaryAllSelected = computed(() => summaryIssues.value.length > 0 && summaryIssues.value.every(
+  (issue) => selectedSummaryIssueIds.value.includes(issue.id),
+));
+
 const selectedPackageCount = computed(() => packageScope.value === "all" ? props.units.length : packageUnitIds.value.length);
 const dialogTitles: Partial<Record<Panel, string>> = {
   import: "导入问题汇总（Excel）",
@@ -199,7 +210,7 @@ const dialogTitles: Partial<Record<Panel, string>> = {
   merge: "合并导入（.auditbak）",
   restore: "导入备份（恢复项目）",
   settings: "编制与预设设置",
-  summary: "问题清单视图",
+  summary: "审迹中台",
   logs: "操作日志（随项目保存）",
   recycle: "问题回收站",
   scan: "附件完整性扫描",
@@ -231,6 +242,14 @@ function show(panel: Panel | string): void {
 }
 
 function command(value: string): void {
+  if (value === "workspace-templates") {
+    emit("openWorkspaceTool", "templates");
+    return;
+  }
+  if (value === "workspace-shortcuts") {
+    emit("openWorkspaceTool", "shortcuts");
+    return;
+  }
   if (value === "health") {
     emit("healthCheck");
     return;
@@ -467,10 +486,58 @@ async function saveIssueNumber(): Promise<void> {
 async function openSummary(): Promise<void> {
   show("summary");
   summary.value = null;
+  selectedSummaryIssueIds.value = [];
   try {
     summary.value = await api.summary();
   } catch (error) {
     report(error);
+  }
+}
+
+function toggleSummaryIssue(issueId: number, checked: boolean): void {
+  if (checked) {
+    if (!selectedSummaryIssueIds.value.includes(issueId)) selectedSummaryIssueIds.value.push(issueId);
+  } else {
+    selectedSummaryIssueIds.value = selectedSummaryIssueIds.value.filter((id) => id !== issueId);
+  }
+}
+
+function toggleAllSummaryIssues(checked: boolean): void {
+  const visibleIds = summaryIssues.value.map((issue) => issue.id);
+  if (checked) {
+    selectedSummaryIssueIds.value = [...new Set([...selectedSummaryIssueIds.value, ...visibleIds])];
+  } else {
+    selectedSummaryIssueIds.value = selectedSummaryIssueIds.value.filter((id) => !visibleIds.includes(id));
+  }
+}
+
+async function batchUpdateSummaryMetadata(): Promise<void> {
+  if (!selectedSummaryIssueIds.value.length) return;
+  const field = batchMetadataField.value;
+  const changes: BatchIssueMetadataChanges = { [field]: batchMetadataValue.value.trim() };
+  working.value = true;
+  try {
+    const preflight = await api.batchIssueMetadataPreflight(selectedSummaryIssueIds.value, changes);
+    if (!preflight.affected) {
+      ElMessage.info("所选底稿在该字段上没有变化");
+      return;
+    }
+    await ElMessageBox.confirm(
+      `将修改 ${preflight.affected} 条底稿；${preflight.unchanged ? `${preflight.unchanged} 条内容相同不会改动。` : ""}${preflight.reviewed ? `其中 ${preflight.reviewed} 条已复核底稿会按既有编辑规则变为“编制完成”。` : ""}确认后会逐条保留版本记录。`,
+      "确认批量维护",
+      { type: "warning", confirmButtonText: "确认修改", cancelButtonText: "取消" },
+    );
+    const result = await api.batchIssueMetadata(
+      preflight.issue_ids, preflight.changes, preflight.confirmation_token,
+    );
+    selectedSummaryIssueIds.value = [];
+    await openSummary();
+    emit("dataChanged");
+    ElMessage.success(`已修改 ${result.updated} 条底稿`);
+  } catch (error) {
+    if (error !== "cancel") report(error);
+  } finally {
+    working.value = false;
   }
 }
 
@@ -1087,7 +1154,7 @@ async function resetProject(): Promise<void> {
 
 <template>
   <div class="project-operations">
-    <el-button size="small" @click="openSummary">📊 项目汇总</el-button>
+    <el-button size="small" @click="openSummary">📊 审迹中台</el-button>
     <el-button size="small" @click="emit('openExchange')">💬 交流修订</el-button>
     <el-button size="small" @click="openSearch">🔍 搜索</el-button>
     <el-dropdown trigger="click" @command="command">
@@ -1099,6 +1166,8 @@ async function resetProject(): Promise<void> {
           <el-dropdown-item command="logs">📋 操作日志</el-dropdown-item>
           <el-dropdown-item command="recycle">♻️ 问题回收站</el-dropdown-item>
           <el-dropdown-item command="settings">⚙️ 编制与预设设置</el-dropdown-item>
+          <el-dropdown-item divided command="workspace-templates">📄 底稿模板</el-dropdown-item>
+          <el-dropdown-item command="workspace-shortcuts">⌨ 工作区快捷键</el-dropdown-item>
           <el-dropdown-item command="rename">✏️ 重命名项目</el-dropdown-item>
           <el-dropdown-item divided command="import">📥 导入问题汇总（Excel）</el-dropdown-item>
           <el-dropdown-item command="export">📤 导出问题汇总（Excel）</el-dropdown-item>
@@ -1139,19 +1208,33 @@ async function resetProject(): Promise<void> {
       </div>
 
       <div v-else-if="activePanel === 'summary'" class="operation-panel">
-        <div class="panel-head"><p>点击问题行可跳转到对应底稿；金额合计随筛选变化。</p><el-button size="small" @click="openSummary">刷新</el-button></div>
-        <el-empty v-if="!summary" description="正在读取问题清单…" :image-size="58" />
+        <div class="panel-head"><p>以底稿清单为主体；项目数据概览仅辅助现场查看。点击问题或单位可直接进入工作区。</p><el-button size="small" @click="openSummary">刷新</el-button></div>
+        <el-empty v-if="!summary" description="正在读取审迹中台…" :image-size="58" />
         <template v-else>
-          <div class="summary-total">共 {{ summary.total }} 个底稿 · 当前筛选 {{ summaryIssues.length }} 项 · 涉及 {{ summaryUnitsCount }} 个单位 · 金额汇总 {{ summaryAmountGroups.groups.length ? summaryAmountGroups.groups.join("；") : "无结构化金额" }}<template v-if="summaryAmountGroups.unstructured">；另有 {{ summaryAmountGroups.unstructured }} 条历史自由文本金额未参与汇总</template></div>
-          <div class="summary-filters"><select v-model="summaryUnitFilter"><option :value="null">全部单位</option><option v-for="unit in units" :key="unit.id" :value="unit.id">{{ unit.name }}</option></select><select v-model="summaryDepartmentFilter"><option value="">全部版块</option><option v-for="department in summaryDepartments" :key="department" :value="department">{{ department || '未分版块' }}</option></select><select v-model="summaryStatusFilter"><option value="">全部状态</option><option v-for="status in summaryStatuses" :key="status" :value="status">{{ status }}</option></select></div>
-          <div class="issue-table-head"><span>底稿</span><span>单位</span><span>版块</span><span>定性</span><span class="num">金额</span><span>状态</span></div>
+          <div class="summary-total">共 {{ summary.total }} 个底稿 · {{ summary.dashboard.overview.units }} 个被审计单位 · {{ summary.dashboard.overview.departments }} 个版块 · {{ summary.dashboard.overview.categories }} 个分类 · {{ summary.dashboard.overview.files }} 个附件</div>
+          <section class="cockpit-metrics">
+            <div class="cockpit-metric"><small>底稿总数</small><strong>{{ summary.dashboard.overview.issues }}</strong><span>当前项目已登记底稿</span></div>
+            <div class="cockpit-metric"><small>底稿覆盖单位</small><strong>{{ summary.dashboard.overview.units_with_issues }}</strong><span>共 {{ summary.dashboard.overview.units }} 个单位</span></div>
+            <div class="cockpit-metric"><small>已关联附件底稿</small><strong>{{ summary.dashboard.evidence.issues_with_evidence }}</strong><span>附件关联为可选工作记录</span></div>
+            <div class="cockpit-metric"><small>结构化金额口径</small><strong>{{ summaryAmountGroups.groups.length }}</strong><span>{{ summaryAmountGroups.groups.length ? summaryAmountGroups.groups.join("；") : "暂无可汇总金额" }}</span></div>
+          </section>
+          <section class="cockpit-issue-list"><div class="cockpit-section-head"><h3>底稿总览</h3><span>当前筛选 {{ summaryIssues.length }} 项 · 涉及 {{ summaryUnitsCount }} 个单位<template v-if="summaryAmountGroups.unstructured"> · 自由文本金额 {{ summaryAmountGroups.unstructured }} 条</template></span></div>
+          <div class="summary-filters"><select v-model="summaryUnitFilter"><option :value="null">全部单位</option><option v-for="unit in units" :key="unit.id" :value="unit.id">{{ unit.name }}</option></select><select v-model="summaryDepartmentFilter"><option value="">全部版块</option><option v-for="department in summaryDepartments" :key="department" :value="department">{{ department || '未分版块' }}</option></select><select v-model="summaryStatusFilter"><option value="">全部状态</option><option v-for="status in summaryStatuses" :key="status" :value="status">{{ status }}</option></select><select v-model="summaryEvidenceFilter"><option value="">全部证据状态</option><option value="with_evidence">已关联附件</option><option value="without_evidence">未关联附件</option></select></div>
+          <div v-if="selectedSummaryIssueIds.length" class="summary-batch-bar"><strong>已选 {{ selectedSummaryIssueIds.length }} 条</strong><select v-model="batchMetadataField" aria-label="批量维护字段"><option value="department">所属版块</option><option value="category">问题分类</option><option value="author">编制人</option><option value="reviewer">复核人</option></select><el-input v-model="batchMetadataValue" placeholder="输入新值；留空可清空该字段" clearable /><el-button size="small" type="primary" :loading="working" @click="batchUpdateSummaryMetadata">批量修改</el-button><el-button size="small" text @click="selectedSummaryIssueIds = []">取消选择</el-button></div>
+          <div class="issue-table-head"><span><input type="checkbox" :checked="summaryAllSelected" aria-label="全选当前筛选底稿" @change="toggleAllSummaryIssues(($event.target as HTMLInputElement).checked)" /></span><span>底稿</span><span>单位</span><span>版块</span><span>定性</span><span class="num">金额</span><span>状态</span></div>
           <div class="issue-table">
             <div v-for="issue in summaryIssues" :key="issue.id" class="issue-table-row" @click="goIssue(issue.id)">
-              <span>{{ formatIssueNo(issue.seq, issueNumberRule) }}</span><span>{{ issue.unit_name }}</span><span>{{ issue.department || '—' }}</span><span class="defect">{{ issue.defect_type }}</span><span class="num">{{ formatMoney(issue.amount) }}</span><span>{{ issue.status }}</span>
+              <span><input type="checkbox" :checked="selectedSummaryIssueIds.includes(issue.id)" :aria-label="`选择底稿 ${formatIssueNo(issue.seq, issueNumberRule)}`" @click.stop @change="toggleSummaryIssue(issue.id, ($event.target as HTMLInputElement).checked)" /></span><span>{{ formatIssueNo(issue.seq, issueNumberRule) }}</span><span>{{ issue.unit_name }}</span><span>{{ issue.department || '—' }}</span><span class="defect">{{ issue.defect_type }}</span><span class="num">{{ formatMoney(issue.amount) }}</span><span>{{ issue.status }}</span>
             </div>
             <el-empty v-if="!summaryIssues.length" description="无符合筛选条件的问题" :image-size="50" />
           </div>
-          <div class="summary-grid"><section><h3>按状态</h3><div v-if="Object.keys(summary.by_status).length" class="summary-items"><div v-for="(count, name) in summary.by_status" :key="name"><span>{{ name }}</span><strong>{{ count }}</strong></div></div><p v-else class="summary-empty">暂无数据</p></section><section><h3>按版块</h3><div v-if="Object.keys(summary.by_dept).length" class="summary-items"><div v-for="(count, name) in summary.by_dept" :key="name"><span>{{ name }}</span><strong>{{ count }}</strong></div></div><p v-else class="summary-empty">暂无数据</p></section><section><h3>按单位（底稿 / 附件）</h3><div v-if="Object.keys(summary.by_unit).length" class="summary-items"><div v-for="(value, name) in summary.by_unit" :key="name"><span>{{ name }}</span><strong>{{ value.issues }} / {{ value.files }}</strong></div></div><p v-else class="summary-empty">暂无数据</p></section></div>
+          </section>
+
+          <div class="summary-grid cockpit-data-grid"><section><h3>按版块</h3><div v-if="Object.keys(summary.by_dept).length" class="summary-items"><div v-for="(count, name) in summary.by_dept" :key="name"><span>{{ name }}</span><strong>{{ count }}</strong></div></div><p v-else class="summary-empty">暂无数据</p></section><section><h3>按分类</h3><div v-if="Object.keys(summary.by_category).length" class="summary-items"><div v-for="(count, name) in summary.by_category" :key="name"><span>{{ name }}</span><strong>{{ count }}</strong></div></div><p v-else class="summary-empty">暂无数据</p></section><section><h3>状态（仅统计）</h3><div v-if="Object.keys(summary.by_status).length" class="summary-items"><div v-for="(count, name) in summary.by_status" :key="name"><span>{{ name }}</span><strong>{{ count }}</strong></div></div><p v-else class="summary-empty">暂无数据</p></section></div>
+
+          <section class="cockpit-coverage"><div class="cockpit-section-head"><h3>单位底稿数据</h3><span>点击单位进入工作区</span></div><div class="coverage-head"><span>被审计单位</span><span>底稿</span><span>附件</span></div><button v-for="unit in summary.dashboard.units" :key="unit.id" class="coverage-row" @click="goUnit(unit.id)"><strong>{{ unit.name }}</strong><span>{{ unit.issues }}</span><span>{{ unit.files }}</span></button></section>
+
+          <section class="cockpit-activity"><div class="cockpit-section-head"><h3>最近操作</h3><span>项目内留痕</span></div><div v-if="summary.dashboard.recent_activity.length" class="activity-list"><div v-for="entry in summary.dashboard.recent_activity" :key="`${entry.created_at}-${entry.action}-${entry.target}`"><time>{{ entry.created_at }}</time><strong>{{ entry.operator }}</strong><span>{{ entry.action }}</span><small>{{ entry.target }}</small></div></div><p v-else class="summary-empty">暂无项目操作记录。</p></section>
         </template>
       </div>
 

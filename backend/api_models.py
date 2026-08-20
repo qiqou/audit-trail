@@ -76,6 +76,12 @@ class NameReq(BaseModel):
     name: str
 
 
+class OrderReq(BaseModel):
+    """完整排序快照；服务端拒绝缺项、重复项和跨范围 ID。"""
+
+    ids: list[int] = Field(default_factory=list)
+
+
 class ResetReq(BaseModel):
     confirm_text: str
 
@@ -90,14 +96,38 @@ class IssueReq(BaseModel):
     category: str | None = None
     defect_type: str | None = None
     defect_desc: str | None = None
+    defect_desc_rich: str | None = None
     amount: str | None = None
     currency: str | None = None
     amount_unit: str | None = None
     regulation_basis: str | None = None
+    regulation_basis_rich: str | None = None
     suggestion: str | None = None
+    suggestion_rich: str | None = None
     author: str | None = None
     reviewer: str | None = None
     status: str | None = None
+
+
+class DuplicateIssueReq(BaseModel):
+    """复制到同单位或指定单位；附件、版本和状态不参与复制。"""
+
+    unit_id: int | None = None
+
+
+class WorkpaperTemplateCreateReq(BaseModel):
+    name: str
+    issue_id: int
+
+
+class WorkpaperTemplateApplyReq(BaseModel):
+    unit_id: int
+
+
+class BatchIssueMetadataReq(BaseModel):
+    issue_ids: list[int] = Field(default_factory=list)
+    changes: dict[str, str] = Field(default_factory=dict)
+    confirmation_token: str = ""
 
 
 class StatusReq(BaseModel):

@@ -8,8 +8,9 @@
 #   S110    关闭资源/清理临时文件时静默异常可接受
 #   ASYNC230 本地小文件流式写入，阻塞可接受
 line-length = 120
-target-version = "py311"
-exclude = ["历史半成品"]
+target-version = "py314"
+# 仅检查项目源码；本地虚拟环境和前端构建产物属于可再生依赖，不应进入质量门禁。
+exclude = [".tooling", ".venv", ".venv-*", "frontend-v3/dist", "frontend-v3/node_modules", "历史半成品"]
 
 [tool.ruff.lint]
 extend-select = ["I"]

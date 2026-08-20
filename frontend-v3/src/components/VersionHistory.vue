@@ -4,7 +4,9 @@ import { ElMessage, ElMessageBox } from "element-plus";
 
 import { api, type Issue, type IssueVersion } from "../api/client";
 
-const props = defineProps<{ issue: Issue; beforeRestore?: () => Promise<boolean> }>();
+const props = withDefaults(defineProps<{ issue: Issue; beforeRestore?: () => Promise<boolean>; triggerVisible?: boolean }>(), {
+  triggerVisible: true,
+});
 const emit = defineEmits<{ restored: [issue: Issue] }>();
 
 const expanded = ref(false);
@@ -44,6 +46,10 @@ async function toggle(): Promise<void> {
   if (expanded.value) await refresh();
 }
 
+async function open(): Promise<void> {
+  if (!expanded.value) await toggle();
+}
+
 async function restore(version: IssueVersion): Promise<void> {
   try {
     await ElMessageBox.confirm(
@@ -74,19 +80,24 @@ watch(() => props.issue.id, () => {
   expanded.value = false;
   preview.value = null;
 });
+
+defineExpose({ open });
 </script>
 
 <template>
   <section class="version-history">
-    <el-button size="small" :loading="loading" @click="toggle">{{ expanded ? "收起版本历史" : "版本历史" }}</el-button>
-    <div v-if="expanded" class="version-list">
+    <el-button v-if="triggerVisible" size="small" :loading="loading" @click="toggle">版本历史</el-button>
+    <el-dialog v-model="expanded" title="版本历史" width="min(760px, calc(100vw - 32px))" append-to-body>
+      <div class="version-dialog-toolbar"><span>共 {{ versions.length }} 个版本；恢复前会自动保留当前内容。</span><el-button text size="small" :loading="loading" @click="refresh">刷新</el-button></div>
+      <div class="version-list version-dialog-list">
       <el-empty v-if="!versions.length && !loading" description="暂无版本记录" :image-size="52" />
       <div v-for="version in ordered" :key="version.id" class="version-row">
         <div><strong>v{{ version.version_no }}</strong><span>{{ describe(version) }}</span><small>{{ version.created_at }} · {{ version.saved_by || "未知" }}</small></div>
         <div class="version-actions"><el-button text type="primary" size="small" @click="preview = version">预览</el-button><el-button size="small" :disabled="issue.status === '已归档'" @click="restore(version)">恢复</el-button></div>
       </div>
       <p v-if="issue.status === '已归档'" class="version-hint">已归档底稿不能直接恢复历史版本，请先执行“归档后编辑”。</p>
-    </div>
+      </div>
+    </el-dialog>
     <el-dialog v-model="previewVisible" :title="preview ? `版本 ${preview.version_no} · ${preview.created_at}` : '版本预览'" width="min(560px, calc(100vw - 32px))" append-to-body>
       <div v-if="preview" class="version-detail">
         <div class="version-detail-row"><span>所属版块</span><strong>{{ preview.snapshot.department || '（空）' }}</strong></div>

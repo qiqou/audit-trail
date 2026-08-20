@@ -66,6 +66,43 @@ def test_summary_empty_project(proj):
     assert s["by_status"] == {}
     assert s["by_dept"] == {}
     assert s["by_unit"] == {}
+    assert s["dashboard"]["overview"] == {
+        "units": 0, "issues": 0, "files": 0, "units_with_issues": 0, "departments": 0, "categories": 0,
+    }
+
+
+def test_dashboard_keeps_workpaper_data_neutral(proj):
+    unit_id = proj.add_unit("单位A", "张三")
+    empty_unit_id = proj.add_unit("单位B", "张三")
+    prepared_id = proj.add_issue(
+        unit_id, "张三", department="财务", defect_type="收入截止", defect_desc="需补充发货证据",
+    )
+    returned_id = proj.add_issue(
+        unit_id, "张三", department="财务", defect_type="函证差异", defect_desc="复核退回",
+    )
+    proj.change_status(prepared_id, "编制完成", "张三")
+    proj.change_status(returned_id, "编制完成", "张三")
+    proj.change_status(returned_id, "复核退回", "李四", comment="请补充解释")
+    source = proj.root / "待关联资料.pdf"
+    source.write_bytes(b"evidence")
+    proj.add_file(unit_id, source, "张三")
+
+    summary = proj.summary()
+    dashboard = summary["dashboard"]
+
+    assert summary["by_status"]["编制完成"] == 1
+    assert summary["by_status"]["复核退回"] == 1
+    assert summary["by_category"]["未分类"] == 2
+    assert dashboard["overview"] == {
+        "units": 2, "issues": 2, "files": 1, "units_with_issues": 1, "departments": 1, "categories": 1,
+    }
+    assert dashboard["evidence"] == {
+        "files_total": 1, "linked_files": 0, "unlinked_files": 1, "issues_with_evidence": 0,
+    }
+    unit = next(item for item in dashboard["units"] if item["id"] == unit_id)
+    assert unit == {"id": unit_id, "name": "单位A", "issues": 2, "files": 1}
+    empty_unit = next(item for item in dashboard["units"] if item["id"] == empty_unit_id)
+    assert empty_unit == {"id": empty_unit_id, "name": "单位B", "issues": 0, "files": 0}
 
 
 def test_export_excel_has_status_version_evidence(proj):

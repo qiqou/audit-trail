@@ -47,8 +47,42 @@ export interface ProjectSummary {
   total: number;
   by_status: Record<string, number>;
   by_dept: Record<string, number>;
+  by_category: Record<string, number>;
   by_unit: Record<string, { issues: number; files: number }>;
   issues: SummaryIssue[];
+  dashboard: ProjectDashboard;
+}
+
+export type BatchIssueMetadataChanges = Partial<Pick<Issue, "department" | "category" | "author" | "reviewer">>;
+
+export interface BatchIssueMetadataPreflight {
+  issue_ids: number[];
+  changes: BatchIssueMetadataChanges;
+  selected: number;
+  affected: number;
+  unchanged: number;
+  reviewed: number;
+  issues: Array<{ id: number; unit_id: number; seq: number; defect_type: string; status: string }>;
+  confirmation_token: string;
+}
+
+export interface ProjectDashboard {
+  overview: {
+    units: number; issues: number; files: number; units_with_issues: number;
+    departments: number; categories: number;
+  };
+  evidence: {
+    files_total: number; linked_files: number; unlinked_files: number; issues_with_evidence: number;
+  };
+  units: DashboardUnit[];
+  recent_activity: Array<{ operator: string; action: string; target: string; created_at: string }>;
+}
+
+export interface DashboardUnit {
+  id: number;
+  name: string;
+  issues: number;
+  files: number;
 }
 
 export interface SearchResult {
@@ -88,18 +122,32 @@ export interface Issue {
   category: string;
   defect_type: string;
   defect_desc: string;
+  defect_desc_rich: string;
   amount: string;
   amount_minor: number | null;
   currency: string;
   amount_unit: string;
   regulation_basis: string;
+  regulation_basis_rich: string;
   suggestion: string;
+  suggestion_rich: string;
   author: string;
   reviewer: string;
   status: IssueStatus;
   created_at: string;
   updated_at: string;
   file_count?: number;
+}
+
+export interface WorkpaperTemplate {
+  id: number;
+  template_uuid: string;
+  name: string;
+  data: Pick<Issue, "department" | "category" | "defect_type" | "defect_desc" | "amount" | "currency" | "amount_unit" | "regulation_basis" | "suggestion">;
+  created_by: string;
+  created_at: string;
+  updated_by: string;
+  updated_at: string;
 }
 
 export type ExchangeRevisionStatus = "proposed" | "accepted" | "rejected" | "withdrawn";
@@ -339,10 +387,14 @@ export interface FolderUploadItem {
 }
 
 export type IssueChanges = Pick<Issue,
-  "department" | "category" | "defect_type" | "defect_desc" | "amount" | "regulation_basis" | "suggestion" | "author" | "reviewer"> & {
+  "department" | "category" | "defect_type" | "defect_desc" | "defect_desc_rich" | "amount" | "regulation_basis" | "regulation_basis_rich" | "suggestion" | "suggestion_rich" | "author" | "reviewer"> & {
   currency?: string;
   amount_unit?: string;
 };
+
+// PATCH 请求允许只提交实际编辑的字段。富文本编辑器临时下线期间，长文本字段
+// 只提交纯文本列；后端会据此清除对应的旧富文本视图，避免旧排版覆盖新输入。
+export type IssuePatch = Partial<IssueChanges>;
 
 interface ApiErrorBody {
   detail?: string;
@@ -440,6 +492,10 @@ class ApiClient {
     return this.request(`/api/units/${unitId}`, { method: "PATCH", body: JSON.stringify({ name }) });
   }
 
+  reorderUnits(ids: number[]): Promise<{ changed: boolean }> {
+    return this.request("/api/units/order", { method: "PUT", body: JSON.stringify({ ids }) });
+  }
+
   deleteUnit(unitId: number): Promise<{ ok: boolean }> {
     return this.request(`/api/units/${unitId}`, { method: "DELETE" });
   }
@@ -450,6 +506,18 @@ class ApiClient {
 
   summary(): Promise<ProjectSummary> {
     return this.request("/api/project/summary");
+  }
+
+  batchIssueMetadataPreflight(issueIds: number[], changes: BatchIssueMetadataChanges): Promise<BatchIssueMetadataPreflight> {
+    return this.request("/api/issues/batch-metadata/preflight", {
+      method: "POST", body: JSON.stringify({ issue_ids: issueIds, changes }),
+    });
+  }
+
+  batchIssueMetadata(issueIds: number[], changes: BatchIssueMetadataChanges, confirmationToken: string): Promise<{ updated: number; unchanged: number; issue_ids: number[] }> {
+    return this.request("/api/issues/batch-metadata", {
+      method: "POST", body: JSON.stringify({ issue_ids: issueIds, changes, confirmation_token: confirmationToken }),
+    });
   }
 
   search(q: string): Promise<SearchResult> {
@@ -655,11 +723,43 @@ class ApiClient {
     });
   }
 
+  reorderIssues(unitId: number, ids: number[]): Promise<{ changed: boolean }> {
+    return this.request(`/api/units/${unitId}/issues/order`, {
+      method: "PUT", body: JSON.stringify({ ids }),
+    });
+  }
+
   issue(issueId: number): Promise<Issue> {
     return this.request(`/api/issues/${issueId}`);
   }
 
-  updateIssue(issueId: number, values: IssueChanges): Promise<{ changed: boolean; issue: Issue }> {
+  duplicateIssue(issueId: number, unitId?: number | null): Promise<Issue> {
+    return this.request(`/api/issues/${issueId}/duplicate`, {
+      method: "POST", body: JSON.stringify(unitId !== undefined && unitId !== null ? { unit_id: unitId } : {}),
+    });
+  }
+
+  workpaperTemplates(): Promise<WorkpaperTemplate[]> {
+    return this.request("/api/workpaper-templates");
+  }
+
+  createWorkpaperTemplate(name: string, issueId: number): Promise<WorkpaperTemplate> {
+    return this.request("/api/workpaper-templates", {
+      method: "POST", body: JSON.stringify({ name, issue_id: issueId }),
+    });
+  }
+
+  applyWorkpaperTemplate(templateId: number, unitId: number): Promise<Issue> {
+    return this.request(`/api/workpaper-templates/${templateId}/apply`, {
+      method: "POST", body: JSON.stringify({ unit_id: unitId }),
+    });
+  }
+
+  deleteWorkpaperTemplate(templateId: number): Promise<{ ok: boolean }> {
+    return this.request(`/api/workpaper-templates/${templateId}`, { method: "DELETE" });
+  }
+
+  updateIssue(issueId: number, values: IssuePatch): Promise<{ changed: boolean; issue: Issue }> {
     return this.request(`/api/issues/${issueId}`, { method: "PATCH", body: JSON.stringify(values) });
   }
 

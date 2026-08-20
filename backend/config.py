@@ -25,7 +25,7 @@ class RuntimeSettings:
     frontend: str = "v3"
 
     @classmethod
-    def from_environment(cls) -> "RuntimeSettings":
+    def from_environment(cls) -> RuntimeSettings:
         # 默认固定端口 8766（与 dataclass 默认一致），避免与原审迹 v1.1
         # 的 8765 冲突；测试/打包可用 AUDIT_ASSISTANT_PORT 覆盖。
         raw_port = os.environ.get("AUDIT_ASSISTANT_PORT", "8766").strip()

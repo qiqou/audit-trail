@@ -1,9 +1,20 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import { api, type Issue, type Unit } from "../api/client";
+import { api, type Issue, type Unit, type WorkpaperTemplate } from "../api/client";
 import { formatIssueNo } from "../format";
+import { moveIdBefore } from "../order";
+import {
+  DEFAULT_WORKSPACE_SHORTCUTS,
+  WORKSPACE_SHORTCUT_STORAGE_KEY,
+  formatShortcut,
+  normalizeWorkspaceShortcuts,
+  resolveWorkspaceShortcut,
+  workspaceShortcutLabels,
+  type WorkspaceShortcut,
+  type WorkspaceShortcuts,
+} from "../shortcuts";
 import EvidencePanel from "./EvidencePanel.vue";
 import ExchangeWorkbench from "./ExchangeWorkbench.vue";
 import IssueEditor from "./IssueEditor.vue";
@@ -31,29 +42,61 @@ const issuesByUnit = ref<Record<string, Issue[]>>({});
 const current = ref<Issue | null>(null);
 const newlyCreatedIssueId = ref<number | null>(null);
 const loading = ref(false);
-const editor = ref<{ confirmLeave: () => Promise<boolean>; hasUnsavedChanges: () => boolean } | null>(null);
+const editor = ref<{
+  confirmLeave: () => Promise<boolean>;
+  hasUnsavedChanges: () => boolean;
+  openDuplicateDialog: () => Promise<void>;
+  openVersionHistory: () => Promise<void>;
+  saveAsTemplate: () => Promise<void>;
+} | null>(null);
 const departmentCreateVisible = ref(false);
 const departmentForCreate = ref("");
 const departmentUnitId = ref<number | null>(null);
 const copyVisible = ref(false);
+const shortcutSettingsVisible = ref(false);
+const workspaceShortcuts = ref<WorkspaceShortcuts>(readWorkspaceShortcuts());
+const shortcutDraft = ref<WorkspaceShortcuts>(cloneWorkspaceShortcuts(workspaceShortcuts.value));
+const templateVisible = ref(false);
+const templates = ref<WorkpaperTemplate[]>([]);
+const templateTargetUnitId = ref<number | null>(null);
+const templateWorking = ref(false);
 const copyScope = ref<CopyScope>("project");
 const copyFields = ref<CopyField[]>(["seq", "unit_name", "department", "category", "defect_type", "defect_desc", "amount", "suggestion", "status"]);
 const collapsedUnits = ref<number[]>(readStoredArray<number>("audit_collapsed_units_v3"));
 const collapsedDepartments = ref<string[]>(readStoredArray<string>("audit_collapsed_departments_v3"));
+const issueListHidden = ref(localStorage.getItem("audit_issue_list_hidden_v3") === "1");
 const leftWidth = ref(readStoredWidth("audit_col_left_v3", 300));
 const rightWidth = ref(readStoredWidth("audit_col_right_v3", 360));
 const viewportWidth = ref(window.innerWidth);
 const exchangeVisible = ref(false);
 const evidenceRefreshKey = ref(0);
+const draggedUnitId = ref<number | null>(null);
+const draggedIssue = ref<{ unitId: number; issueId: number } | null>(null);
+const unitDropTargetId = ref<number | null>(null);
+const issueDropTargetId = ref<number | null>(null);
+const orderSaving = ref(false);
 let stopResize: (() => void) | undefined;
 
-const unitRows = computed(() => props.units.map((unit) => ({
+function cloneWorkspaceShortcuts(source: WorkspaceShortcuts): WorkspaceShortcuts {
+  return normalizeWorkspaceShortcuts(source);
+}
+
+function readWorkspaceShortcuts(): WorkspaceShortcuts {
+  try {
+    const stored = localStorage.getItem(WORKSPACE_SHORTCUT_STORAGE_KEY);
+    return normalizeWorkspaceShortcuts(stored ? JSON.parse(stored) : DEFAULT_WORKSPACE_SHORTCUTS);
+  } catch {
+    return cloneWorkspaceShortcuts(DEFAULT_WORKSPACE_SHORTCUTS);
+  }
+}
+
+const allUnitRows = computed(() => props.units.map((unit) => ({
   unit,
   issues: issuesByUnit.value[String(unit.id)] ?? [],
 })));
 const departmentGroups = computed<DepartmentGroup[]>(() => {
   const groups = new Map<string, DepartmentGroup>();
-  for (const { unit, issues } of unitRows.value) {
+  for (const { unit, issues } of allUnitRows.value) {
     for (const issue of issues) {
       const name = issue.department.trim() || "未分版块";
       const group = groups.get(name) ?? { name, issues: [] };
@@ -69,16 +112,23 @@ const departmentGroups = computed<DepartmentGroup[]>(() => {
   });
 });
 const selectedUnit = computed(() => props.units.find((unit) => unit.id === selectedUnitId.value) ?? null);
-const totalIssueCount = computed(() => Object.values(issuesByUnit.value).flat().length);
-const exchangeIssueItems = computed(() => unitRows.value.flatMap(({ unit, issues }) => issues.map((issue) => ({
+const totalIssueCount = computed(() => allUnitRows.value.reduce((total, row) => total + row.issues.length, 0));
+const exchangeIssueItems = computed(() => allUnitRows.value.flatMap(({ unit, issues }) => issues.map((issue) => ({
   ...issue, unit_name: unit.name,
 }))));
-const listSummary = computed(() => treeView.value === "unit"
-  ? `${props.units.length} 个单位 · ${totalIssueCount.value} 个底稿`
-  : `${departmentGroups.value.length} 个版块 · ${totalIssueCount.value} 个底稿`);
+const listSummary = computed(() => {
+  return treeView.value === "unit"
+    ? `${props.units.length} 个单位 · ${totalIssueCount.value} 个底稿`
+    : `${departmentGroups.value.length} 个版块 · ${totalIssueCount.value} 个底稿`;
+});
 const compactLayout = computed(() => viewportWidth.value < 1280);
-const workspaceStyle = computed(() => compactLayout.value ? {} : {
-  gridTemplateColumns: `${leftWidth.value}px minmax(420px, 1fr) ${rightWidth.value}px`,
+const workspaceStyle = computed(() => {
+  if (issueListHidden.value) {
+    return { gridTemplateColumns: compactLayout.value ? "minmax(0, 1fr)" : `minmax(420px, 1fr) ${rightWidth.value}px` };
+  }
+  return compactLayout.value ? {} : {
+    gridTemplateColumns: `${leftWidth.value}px minmax(420px, 1fr) ${rightWidth.value}px`,
+  };
 });
 const copyFieldOptions: Array<{ value: CopyField; label: string }> = [
   { value: "seq", label: "序号" }, { value: "unit_name", label: "被审计单位" },
@@ -91,14 +141,14 @@ const copyFieldOptions: Array<{ value: CopyField; label: string }> = [
 ];
 const copyRows = computed(() => {
   if (copyScope.value === "unit") {
-    return unitRows.value.filter((row) => row.unit.id === selectedUnitId.value);
+    return allUnitRows.value.filter((row) => row.unit.id === selectedUnitId.value);
   }
   if (copyScope.value === "issue" && current.value) {
-    return unitRows.value
+    return allUnitRows.value
       .filter((row) => row.unit.id === current.value?.unit_id)
       .map((row) => ({ ...row, issues: row.issues.filter((issue) => issue.id === current.value?.id) }));
   }
-  return unitRows.value;
+  return allUnitRows.value;
 });
 const copyText = computed(() => {
   const options = copyFieldOptions.filter((option) => copyFields.value.includes(option.value));
@@ -136,6 +186,11 @@ function readStoredWidth(key: string, fallback: number): number {
 function persistCollapsed(): void {
   localStorage.setItem("audit_collapsed_units_v3", JSON.stringify(collapsedUnits.value));
   localStorage.setItem("audit_collapsed_departments_v3", JSON.stringify(collapsedDepartments.value));
+}
+
+function toggleIssueList(): void {
+  issueListHidden.value = !issueListHidden.value;
+  localStorage.setItem("audit_issue_list_hidden_v3", issueListHidden.value ? "1" : "0");
 }
 
 function updateViewport(): void {
@@ -178,10 +233,14 @@ function startResize(side: "left" | "right", event: MouseEvent): void {
   document.addEventListener("mouseup", onUp);
 }
 
-onMounted(() => window.addEventListener("resize", updateViewport));
+onMounted(() => {
+  window.addEventListener("resize", updateViewport);
+  window.addEventListener("keydown", onWorkspaceKeydown);
+});
 onBeforeUnmount(() => {
   stopResize?.();
   window.removeEventListener("resize", updateViewport);
+  window.removeEventListener("keydown", onWorkspaceKeydown);
 });
 
 function report(error: unknown): void {
@@ -228,14 +287,16 @@ function formatNo(seq: number | string): string {
   return formatIssueNo(seq, props.issueNumberRule);
 }
 
-async function select(issue: Issue): Promise<void> {
-  if (current.value?.id === issue.id) return;
-  if (current.value && editor.value && !(await editor.value.confirmLeave())) return;
+async function select(issue: Issue): Promise<boolean> {
+  if (current.value?.id === issue.id) return true;
+  if (current.value && editor.value && !(await editor.value.confirmLeave())) return false;
   try {
     selectedUnitId.value = issue.unit_id;
     current.value = await api.issue(issue.id);
+    return true;
   } catch (error) {
     report(error);
+    return false;
   }
 }
 
@@ -251,6 +312,127 @@ async function create(unitId = selectedUnitId.value, department = ""): Promise<v
     ElMessage.success("已新建草稿底稿");
   } catch (error) {
     report(error);
+  }
+}
+
+async function navigateIssue(offset: -1 | 1): Promise<void> {
+  const visibleIssues = allUnitRows.value.flatMap((row) => row.issues);
+  if (!visibleIssues.length) {
+    ElMessage.info("当前范围没有可定位的底稿");
+    return;
+  }
+  const currentIndex = current.value ? visibleIssues.findIndex((issue) => issue.id === current.value?.id) : -1;
+  const nextIndex = currentIndex < 0
+    ? (offset > 0 ? 0 : visibleIssues.length - 1)
+    : (currentIndex + offset + visibleIssues.length) % visibleIssues.length;
+  await select(visibleIssues[nextIndex]);
+}
+
+async function issueMoreCommand(issue: Issue, command: string): Promise<void> {
+  if (!(await select(issue))) return;
+  await nextTick();
+  if (command === "duplicate") await editor.value?.openDuplicateDialog();
+  if (command === "versions") await editor.value?.openVersionHistory();
+  if (command === "template") await editor.value?.saveAsTemplate();
+  if (command === "delete") await deleteIssue(issue);
+}
+
+function onWorkspaceKeydown(event: KeyboardEvent): void {
+  const shortcut = resolveWorkspaceShortcut(event, workspaceShortcuts.value);
+  if (!shortcut) return;
+  event.preventDefault();
+  void runWorkspaceShortcut(shortcut);
+}
+
+async function runWorkspaceShortcut(shortcut: WorkspaceShortcut): Promise<void> {
+  switch (shortcut) {
+    case "new-issue": await create(); break;
+    case "next-issue": await navigateIssue(1); break;
+    case "previous-issue": await navigateIssue(-1); break;
+    case "toggle-issue-list": toggleIssueList(); break;
+  }
+}
+
+async function copiedIssue(issue: Issue): Promise<void> {
+  selectedUnitId.value = issue.unit_id;
+  newlyCreatedIssueId.value = issue.id;
+  await loadTree();
+  current.value = issue;
+}
+
+async function openTemplateDialog(): Promise<void> {
+  templateTargetUnitId.value = props.units.some((unit) => unit.id === selectedUnitId.value)
+    ? selectedUnitId.value
+    : props.units[0]?.id ?? null;
+  templateVisible.value = true;
+  try {
+    templates.value = await api.workpaperTemplates();
+  } catch (error) {
+    report(error);
+  }
+}
+
+function openShortcutSettings(): void {
+  shortcutDraft.value = cloneWorkspaceShortcuts(workspaceShortcuts.value);
+  shortcutSettingsVisible.value = true;
+}
+
+function saveWorkspaceShortcuts(): void {
+  workspaceShortcuts.value = normalizeWorkspaceShortcuts(shortcutDraft.value);
+  shortcutDraft.value = cloneWorkspaceShortcuts(workspaceShortcuts.value);
+  localStorage.setItem(WORKSPACE_SHORTCUT_STORAGE_KEY, JSON.stringify(workspaceShortcuts.value));
+  shortcutSettingsVisible.value = false;
+  ElMessage.success("工作区快捷键已保存");
+}
+
+function resetWorkspaceShortcuts(): void {
+  shortcutDraft.value = cloneWorkspaceShortcuts(DEFAULT_WORKSPACE_SHORTCUTS);
+}
+
+function shortcutKeyIsArrow(key: string): boolean {
+  return key === "ArrowUp" || key === "ArrowDown";
+}
+
+function normalizeShortcutDraftInput(action: WorkspaceShortcut): void {
+  const binding = shortcutDraft.value[action];
+  binding.key = binding.key.trim();
+  binding.altKey = !shortcutKeyIsArrow(binding.key);
+}
+
+async function applyTemplate(template: WorkpaperTemplate): Promise<void> {
+  if (!templateTargetUnitId.value || templateWorking.value) return;
+  if (current.value && editor.value && !(await editor.value.confirmLeave())) return;
+  templateWorking.value = true;
+  try {
+    const issue = await api.applyWorkpaperTemplate(template.id, templateTargetUnitId.value);
+    templateVisible.value = false;
+    await copiedIssue(issue);
+    ElMessage.success(`已按模板“${template.name}”新建草稿底稿`);
+  } catch (error) {
+    report(error);
+  } finally {
+    templateWorking.value = false;
+  }
+}
+
+async function deleteTemplate(template: WorkpaperTemplate): Promise<void> {
+  if (templateWorking.value) return;
+  try {
+    await ElMessageBox.confirm(`删除模板“${template.name}”不会影响已按该模板创建的底稿。`, "删除底稿模板", {
+      type: "warning", confirmButtonText: "删除模板", cancelButtonText: "取消",
+    });
+  } catch {
+    return;
+  }
+  templateWorking.value = true;
+  try {
+    await api.deleteWorkpaperTemplate(template.id);
+    templates.value = templates.value.filter((item) => item.id !== template.id);
+    ElMessage.success("底稿模板已删除");
+  } catch (error) {
+    report(error);
+  } finally {
+    templateWorking.value = false;
   }
 }
 
@@ -316,6 +498,67 @@ async function deleteUnit(unit: Unit, issueCount: number): Promise<void> {
     ElMessage.success("单位已删除");
   } catch (error) {
     if (error !== "cancel" && error !== "close") report(error);
+  }
+}
+
+function startUnitDrag(unitId: number, event: DragEvent): void {
+  if (treeView.value !== "unit" || orderSaving.value) return;
+  draggedUnitId.value = unitId;
+  event.dataTransfer?.setData("text/plain", `unit:${unitId}`);
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+}
+
+function clearUnitDrag(): void {
+  draggedUnitId.value = null;
+  unitDropTargetId.value = null;
+}
+
+async function dropUnitBefore(targetId: number): Promise<void> {
+  const sourceId = draggedUnitId.value;
+  clearUnitDrag();
+  if (!sourceId || sourceId === targetId || orderSaving.value) return;
+  const ids = moveIdBefore(props.units.map((unit) => unit.id), sourceId, targetId);
+  if (ids === props.units.map((unit) => unit.id)) return;
+  orderSaving.value = true;
+  try {
+    await api.reorderUnits(ids);
+    emit("unitsChanged");
+    ElMessage.success("被审单位排序已保存");
+  } catch (error) {
+    report(error);
+  } finally {
+    orderSaving.value = false;
+  }
+}
+
+function startIssueDrag(unitId: number, issueId: number, event: DragEvent): void {
+  if (treeView.value !== "unit" || orderSaving.value) return;
+  draggedIssue.value = { unitId, issueId };
+  event.dataTransfer?.setData("text/plain", `issue:${issueId}`);
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+}
+
+function clearIssueDrag(): void {
+  draggedIssue.value = null;
+  issueDropTargetId.value = null;
+}
+
+async function dropIssueBefore(unitId: number, targetId: number): Promise<void> {
+  const source = draggedIssue.value;
+  clearIssueDrag();
+  if (!source || source.unitId !== unitId || source.issueId === targetId || orderSaving.value) return;
+  const currentIds = (issuesByUnit.value[String(unitId)] ?? []).map((issue) => issue.id);
+  const ids = moveIdBefore(currentIds, source.issueId, targetId);
+  if (ids === currentIds) return;
+  orderSaving.value = true;
+  try {
+    await api.reorderIssues(unitId, ids);
+    await loadTree();
+    ElMessage.success("底稿排序已保存；底稿编号不变");
+  } catch (error) {
+    report(error);
+  } finally {
+    orderSaving.value = false;
   }
 }
 
@@ -451,30 +694,31 @@ function selectUnit(unitId: number): void {
   current.value = null;
 }
 
-defineExpose({ confirmCurrentLeave, hasUnsavedChanges, selectIssueById, selectUnit, openExchange });
+defineExpose({ confirmCurrentLeave, hasUnsavedChanges, selectIssueById, selectUnit, openExchange, openTemplateDialog, openShortcutSettings });
 </script>
 
 <template>
-  <section class="workspace" :style="workspaceStyle">
-    <aside class="issue-list panel">
-      <div class="panel-head"><div><p class="eyebrow">审计底稿</p><h2>问题列表</h2></div><span class="tree-header-actions"><el-button size="small" title="复制底稿字段到剪贴板" @click="openCopyDialog">⧉ 复制</el-button><el-button type="primary" size="small" @click="addUnit">新增单位</el-button></span></div>
+  <section class="workspace" :class="{ 'issue-list-hidden': issueListHidden, 'compact-layout': compactLayout }" :style="workspaceStyle">
+    <button v-if="issueListHidden" type="button" class="issue-list-restore" title="展开被审单位和问题列表" aria-label="展开被审单位和问题列表" @click="toggleIssueList">▸</button>
+    <aside v-show="!issueListHidden" class="issue-list panel">
+      <div class="panel-head"><div><p class="eyebrow">审计底稿</p><h2>问题列表</h2></div><span class="tree-header-actions"><el-button size="small" title="复制底稿字段到剪贴板" @click="openCopyDialog">⧉ 复制</el-button><el-button type="primary" size="small" @click="addUnit">新增单位</el-button><el-button text size="small" class="issue-list-toggle" title="折叠被审单位和问题列表" aria-label="折叠被审单位和问题列表" @click="toggleIssueList">⇤</el-button></span></div>
       <div class="tree-view-tabs"><button :class="{ active: treeView === 'unit' }" @click="switchView('unit')">按单位</button><button :class="{ active: treeView === 'department' }" @click="switchView('department')">按版块</button></div>
       <p class="tree-summary">{{ listSummary }}</p>
 
       <el-empty v-if="!units.length" description="请先建立被审计单位" :image-size="72" />
       <template v-else-if="treeView === 'unit'">
-        <div v-for="row in unitRows" :key="row.unit.id" class="tree-group">
-          <div class="tree-group-head" :class="{ selected: selectedUnitId === row.unit.id }"><button class="tree-toggle" :aria-expanded="!collapsedUnits.includes(row.unit.id)" :title="collapsedUnits.includes(row.unit.id) ? '展开单位' : '折叠单位'" @click="toggleUnit(row.unit.id)">{{ collapsedUnits.includes(row.unit.id) ? '▸' : '▾' }}</button><button class="tree-unit-label" @click="selectedUnitId = row.unit.id">🏢 {{ row.unit.name }}<small>{{ row.issues.length }} 条</small></button><span class="tree-group-tools"><el-button text size="small" title="在该单位新建底稿" @click="create(row.unit.id)">＋</el-button><el-button text size="small" title="重命名单位" @click="renameUnit(row.unit)">✎</el-button><el-button text type="danger" size="small" title="删除单位" @click="deleteUnit(row.unit, row.issues.length)">✕</el-button></span></div>
-          <button v-for="issue in row.issues" v-show="!collapsedUnits.includes(row.unit.id)" :key="issue.id" class="issue-item" :class="{ active: current?.id === issue.id }" @click="select(issue)"><span class="issue-number">{{ formatNo(issue.seq) }}</span><span><strong>{{ issue.defect_type || '未定性' }}</strong><small>{{ issue.department || '未分版块' }} · 附件 {{ issue.file_count ?? 0 }}</small></span><el-tag size="small" :type="issue.status === '已归档' ? 'info' : issue.status === '已复核' ? 'success' : issue.status === '复核退回' ? 'warning' : 'primary'">{{ issue.status }}</el-tag></button>
+        <div v-for="row in allUnitRows" :key="row.unit.id" class="tree-group" :class="{ 'tree-drop-target': unitDropTargetId === row.unit.id }" @dragover.prevent="unitDropTargetId = row.unit.id" @dragleave="unitDropTargetId = null" @drop.prevent="dropUnitBefore(row.unit.id)">
+          <div class="tree-group-head" :class="{ selected: selectedUnitId === row.unit.id }"><button class="tree-toggle" :aria-expanded="!collapsedUnits.includes(row.unit.id)" :title="collapsedUnits.includes(row.unit.id) ? '展开单位' : '折叠单位'" @click="toggleUnit(row.unit.id)">{{ collapsedUnits.includes(row.unit.id) ? '▸' : '▾' }}</button><span class="sort-drag-handle" :draggable="!orderSaving" title="拖动调整单位顺序" aria-label="拖动调整单位顺序" @dragstart.stop="startUnitDrag(row.unit.id, $event)" @dragend="clearUnitDrag">⠿</span><button class="tree-unit-label" @click="selectedUnitId = row.unit.id">🏢 {{ row.unit.name }}<small>{{ row.issues.length }} 条</small></button><span class="tree-group-tools"><el-button text size="small" title="在该单位新建底稿" @click="create(row.unit.id)">＋</el-button><el-button text size="small" title="重命名单位" @click="renameUnit(row.unit)">✎</el-button><el-button text type="danger" size="small" title="删除单位" @click="deleteUnit(row.unit, row.issues.length)">✕</el-button></span></div>
+          <div v-for="issue in row.issues" v-show="!collapsedUnits.includes(row.unit.id)" :key="issue.id" class="issue-list-row" :class="{ 'tree-drop-target': issueDropTargetId === issue.id }" @dragover.prevent="issueDropTargetId = issue.id" @dragleave="issueDropTargetId = null" @drop.prevent="dropIssueBefore(row.unit.id, issue.id)"><button class="issue-item sortable-issue-item" :class="{ active: current?.id === issue.id }" @click="select(issue)"><span class="sort-drag-handle" :draggable="!orderSaving" title="拖动调整底稿顺序" aria-label="拖动调整底稿顺序" @dragstart.stop="startIssueDrag(row.unit.id, issue.id, $event)" @dragend="clearIssueDrag" @click.stop>⠿</span><span class="issue-number">{{ formatNo(issue.seq) }}</span><span><strong>{{ issue.defect_type || '未定性' }}</strong><small>{{ issue.department || '未分版块' }} · 附件 {{ issue.file_count ?? 0 }}</small></span></button><el-dropdown trigger="click" @command="(command: string) => issueMoreCommand(issue, command)"><el-button text size="small" class="issue-more" title="底稿操作菜单" aria-label="底稿操作菜单" @click.stop>▾</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="duplicate">复制为新底稿</el-dropdown-item><el-dropdown-item command="versions">版本历史</el-dropdown-item><el-dropdown-item command="template">保存为模板</el-dropdown-item><el-dropdown-item divided command="delete">移入回收站</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div>
         </div>
       </template>
       <template v-else>
         <div v-if="!departmentGroups.length" class="tree-empty">暂无底稿</div>
-        <div v-for="group in departmentGroups" :key="group.name" class="tree-group"><div class="tree-group-title"><span><button class="tree-toggle" :aria-expanded="!collapsedDepartments.includes(group.name)" :title="collapsedDepartments.includes(group.name) ? '展开版块' : '折叠版块'" @click="toggleDepartment(group.name)">{{ collapsedDepartments.includes(group.name) ? '▸' : '▾' }}</button>📂 {{ group.name }}<small>{{ group.issues.length }} 条</small></span><el-button text size="small" title="选择单位后新建并预填版块" @click="createInDepartment(group.name)">＋</el-button></div><button v-for="issue in group.issues" v-show="!collapsedDepartments.includes(group.name)" :key="issue.id" class="issue-item" :class="{ active: current?.id === issue.id }" @click="select(issue)"><span class="issue-number">{{ formatNo(issue.seq) }}</span><span><strong>{{ issue.defect_type || '未定性' }}</strong><small>{{ issue.unit_name }} · 附件 {{ issue.file_count ?? 0 }}</small></span><el-tag size="small" :type="issue.status === '已归档' ? 'info' : issue.status === '已复核' ? 'success' : issue.status === '复核退回' ? 'warning' : 'primary'">{{ issue.status }}</el-tag></button></div>
+        <div v-for="group in departmentGroups" :key="group.name" class="tree-group"><div class="tree-group-title"><span><button class="tree-toggle" :aria-expanded="!collapsedDepartments.includes(group.name)" :title="collapsedDepartments.includes(group.name) ? '展开版块' : '折叠版块'" @click="toggleDepartment(group.name)">{{ collapsedDepartments.includes(group.name) ? '▸' : '▾' }}</button>📂 {{ group.name }}<small>{{ group.issues.length }} 条</small></span><el-button text size="small" title="选择单位后新建并预填版块" @click="createInDepartment(group.name)">＋</el-button></div><div v-for="issue in group.issues" v-show="!collapsedDepartments.includes(group.name)" :key="issue.id" class="issue-list-row"><button class="issue-item" :class="{ active: current?.id === issue.id }" @click="select(issue)"><span class="issue-number">{{ formatNo(issue.seq) }}</span><span><strong>{{ issue.defect_type || '未定性' }}</strong><small>{{ issue.unit_name }} · 附件 {{ issue.file_count ?? 0 }}</small></span></button><el-dropdown trigger="click" @command="(command: string) => issueMoreCommand(issue, command)"><el-button text size="small" class="issue-more" title="底稿操作菜单" aria-label="底稿操作菜单" @click.stop>▾</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="duplicate">复制为新底稿</el-dropdown-item><el-dropdown-item command="versions">版本历史</el-dropdown-item><el-dropdown-item command="template">保存为模板</el-dropdown-item><el-dropdown-item divided command="delete">移入回收站</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></div>
       </template>
     </aside>
 
-    <IssueEditor v-if="current" ref="editor" :issue="current" :departments="departments" :categories="categories" :auto-save-mode="autoSaveMode" :is-new="newlyCreatedIssueId === current.id" :issue-number-rule="issueNumberRule" @updated="updated" @discarded="discardedIssue" @delete-requested="deleteIssue" />
+    <IssueEditor v-if="current" ref="editor" :issue="current" :units="units" :departments="departments" :categories="categories" :auto-save-mode="autoSaveMode" :is-new="newlyCreatedIssueId === current.id" :issue-number-rule="issueNumberRule" @updated="updated" @copied="copiedIssue" @discarded="discardedIssue" @delete-requested="deleteIssue" />
     <EvidencePanel v-if="current" :key="`${current.id}-${evidenceRefreshKey}`" :issue="current" :units="units" @changed="loadTree" />
     <article v-if="!current" class="empty-editor panel"><el-empty :description="selectedUnit ? '选择或新建底稿后开始编制' : '请先选择被审计单位'" /></article>
     <div class="workspace-resizer left" :style="{ left: `${leftWidth}px` }" title="拖拽调整问题列表宽度" @mousedown.prevent="startResize('left', $event)" />
@@ -498,6 +742,17 @@ defineExpose({ confirmCurrentLeave, hasUnsavedChanges, selectIssueById, selectUn
         <pre class="copy-preview">{{ copyText || "请选择字段后预览" }}</pre>
       </div>
       <template #footer><el-button @click="copyVisible = false">取消</el-button><el-button type="primary" :disabled="!copyFields.length" @click="copyIssues">复制到剪贴板</el-button></template>
+    </el-dialog>
+    <el-dialog v-model="shortcutSettingsVisible" title="工作区快捷键" width="min(560px, calc(100vw - 32px))" append-to-body>
+      <p class="shortcut-hint">仅在非输入区域生效。方向键可直接使用；字母和数字必须搭配 Alt，不会接管 Ctrl、Command 或编辑器按键。</p>
+      <div class="shortcut-list shortcut-settings-list"><div v-for="item in workspaceShortcutLabels" :key="item.action"><span>{{ item.description }}</span><el-select v-model="shortcutDraft[item.action].key" filterable allow-create default-first-option aria-label="快捷键按键" @change="normalizeShortcutDraftInput(item.action)"><el-option label="↑ 上方向键" value="ArrowUp" /><el-option label="↓ 下方向键" value="ArrowDown" /><el-option v-for="key in 'abcdefghijklmnopqrstuvwxyz0123456789'.split('')" :key="key" :label="key.toUpperCase()" :value="key" /></el-select><span class="shortcut-alt">{{ shortcutKeyIsArrow(shortcutDraft[item.action].key) ? '无修饰键' : 'Alt' }}</span><kbd>{{ formatShortcut(shortcutDraft[item.action]) }}</kbd></div></div>
+      <template #footer><el-button @click="resetWorkspaceShortcuts">恢复默认</el-button><el-button @click="shortcutSettingsVisible = false">取消</el-button><el-button type="primary" @click="saveWorkspaceShortcuts">保存</el-button></template>
+    </el-dialog>
+    <el-dialog v-model="templateVisible" title="项目内底稿模板" width="min(680px, calc(100vw - 32px))" append-to-body>
+      <p class="template-hint">模板只复用通用编制内容；人员、状态、附件、版本和交流记录不会带入新底稿。</p>
+      <label class="template-target">目标被审计单位<el-select v-model="templateTargetUnitId" filterable placeholder="请选择单位"><el-option v-for="unit in units" :key="unit.id" :label="unit.name" :value="unit.id" /></el-select></label>
+      <el-empty v-if="!templates.length" description="暂无模板。可在任一已编制底稿中点击“保存为模板”。" :image-size="58" />
+      <div v-else class="template-list"><article v-for="template in templates" :key="template.id"><div><strong>{{ template.name }}</strong><small>{{ template.data.department || '未分版块' }} · {{ template.data.category || '未分类' }} · {{ template.updated_at }} 由 {{ template.updated_by }}</small><p>{{ template.data.defect_type || '未定性底稿' }}</p></div><span><el-button size="small" :disabled="!templateTargetUnitId" :loading="templateWorking" type="primary" @click="applyTemplate(template)">套用</el-button><el-button text size="small" type="danger" :disabled="templateWorking" @click="deleteTemplate(template)">删除</el-button></span></article></div>
     </el-dialog>
     <ExchangeWorkbench v-if="exchangeVisible && current" :issue="current" :issue-items="exchangeIssueItems" :issue-number-rule="issueNumberRule" @applied="exchangeApplied" @evidence-changed="exchangeEvidenceChanged" @close="exchangeVisible = false" />
   </section>

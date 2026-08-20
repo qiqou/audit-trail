@@ -9,7 +9,6 @@
 """
 
 import hashlib
-import json
 import os
 import shutil
 import sqlite3
@@ -20,7 +19,7 @@ import time
 import traceback
 import uuid
 from contextvars import ContextVar
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
@@ -34,12 +33,11 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from api_models import (
-    AmountSettingsReq,
     BackupSettingsReq,
+    BatchIssueMetadataReq,
     BatchRenameReq,
-    CategoryReq,
     CreateReq,
-    DeptReq,
+    DuplicateIssueReq,
     ExchangeCloseReq,
     ExchangeCommentReq,
     ExchangeRequestReq,
@@ -48,7 +46,6 @@ from api_models import (
     ExchangeRevisionReq,
     ExportReq,
     FolderReq,
-    IssueNumberReq,
     IssueReq,
     LocalBackupRestoreReq,
     LocalMergeReq,
@@ -56,14 +53,17 @@ from api_models import (
     NameReq,
     OpenReq,
     OperatorReq,
+    OrderReq,
     PackageReq,
     RecoveryPointRestoreReq,
     ResetReq,
     StatusReq,
+    WorkpaperTemplateApplyReq,
+    WorkpaperTemplateCreateReq,
 )
 from app_launcher import launch_service, serve_app
 from config import PROJECT_EXT, RuntimeSettings
-from database import OUT_DIR, AuditProject
+from database import OUT_DIR, SYSTEM_METADATA_NAMES, AuditProject
 from jobs import JobContext, job_runner
 from platform_adapter import (
     OSIdentity,
@@ -79,13 +79,17 @@ from platform_adapter import (
 from platform_adapter import (
     choose_folder as platform_choose_folder,
 )
+from routers.settings import build_router as build_settings_router
+from routers.units import build_router as build_units_router
 from runtime_log import install_unhandled_error_handler, log_runtime_event
 
 SETTINGS = RuntimeSettings.from_environment()
 HOST = SETTINGS.host
 # 改造版独立于原审迹 v1.1 的单实例锁和端点记录。仅改端口还不够：若共用
 # shenji.lock，启动器会把原版实例误认为当前版本并直接打开它的页面。
-INSTANCE_LOCK_NAME = "shenji-v11-upgrade.lock"
+# v1.3 必须与 v1.2 使用不同单实例标识；端口可由运行配置独立指定，
+# 但同一 v1.3 进程只允许一个实例，避免同一项目双写。
+INSTANCE_LOCK_NAME = "audit-trail-v13.lock"
 # 打包环境（PyInstaller）与开发环境均只加载 V3 正式前端。
 if getattr(sys, "_MEIPASS", None):
     V3_FRONTEND_DIR = Path(sys._MEIPASS) / "frontend-v3" / "dist"
@@ -117,9 +121,15 @@ def _folder_fingerprint(folder_files: list) -> str:
     parts = []
     for item in folder_files:
         rel, tmp = item[:2]
+        relative = rel.replace("\\", "/")
+        # 与数据层的目录摘要保持同一口径。Finder/浏览器偶尔会把 .DS_Store
+        # 一并交给粘贴或拖入流程；该元数据会被保存，但不属于审计证据摘要。
+        # 此处若仍计入预先指纹，会与 add_folder 落盘后的摘要不一致并产生误报。
+        if any(part in SYSTEM_METADATA_NAMES for part in PurePosixPath(relative).parts):
+            continue
         # 上传流已得到成员摘要时直接复用；历史/导入调用保留落盘后计算的兼容路径。
         member_sha = item[2] if len(item) > 2 else _sha256_of(tmp)
-        parts.append(f"{rel.replace(chr(92), '/')}\t{member_sha}")
+        parts.append(f"{relative}\t{member_sha}")
     parts.sort()
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
@@ -152,6 +162,7 @@ class SessionContext:
         self.last_seen = time.monotonic()
         self.archive_preflights: dict[str, dict] = {}
         self.merge_preflights: dict[str, dict] = {}
+        self.batch_issue_preflights: dict[str, dict] = {}
         # 项目租约被其他会话接管（体验优化：强制切换而非拒绝打开）；
         # 心跳响应携带一次 project_preempted，前端据此提示并返回项目列表。
         self.preempted = False
@@ -184,7 +195,7 @@ def _expire_sessions(now: float | None = None) -> int:
     return len(stale)
 
 # 当前请求的会话上下文（HTTP 中间件设置，请求上下文链内传播）
-_ctx_var: "ContextVar[SessionContext | None]" = ContextVar("audit_ctx", default=None)
+_ctx_var: ContextVar[SessionContext | None] = ContextVar("audit_ctx", default=None)
 
 
 @app.middleware("http")
@@ -292,6 +303,7 @@ def _bind_project_identity(project: AuditProject, ctx: SessionContext) -> None:
     project.set_audit_identity(ctx.identity.account_id, ctx.identity.device_id)
     ctx.archive_preflights.clear()
     ctx.merge_preflights.clear()
+    ctx.batch_issue_preflights.clear()
 
 
 def _project_info() -> dict:
@@ -482,10 +494,17 @@ def create_project(req: CreateReq, operator: str = Depends(get_operator)):
     _reserve_project(ctx, key)
     try:
         opened_project = AuditProject(p)
-    except (OSError, sqlite3.Error, ValueError):
+    except ValueError as exc:
         if ctx.project_key != key:
             _release_project_lease(ctx, key)
-        raise
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (OSError, sqlite3.Error) as exc:
+        if ctx.project_key != key:
+            _release_project_lease(ctx, key)
+        raise HTTPException(
+            status_code=400,
+            detail=f"无法创建项目「{p}」：{exc}。请确认该目录可写，且未被其他程序锁定后重试",
+        ) from exc
     _close_current_project(preserve_key=key)
     ctx.project = opened_project
     ctx.project_key = key
@@ -653,7 +672,7 @@ def project_manifest(_: str = Depends(get_operator)):
 
 @app.get("/api/project/summary")
 def project_summary(_: str = Depends(get_operator)):
-    """三维汇总（T8）：按状态/版块/单位 + 问题明细，数量与明细一致。"""
+    """项目汇总：底稿明细、分布统计与轻量项目数据概览。"""
     return get_project().summary()
 
 
@@ -689,43 +708,10 @@ def _close_current_project(preserve_key: str = ""):
         _close_session_project(ctx, preserve_key)
 
 
-# ───────────────────────── 单位 ─────────────────────────
-
-@app.get("/api/units")
-def list_units(_: str = Depends(get_operator)):
-    return get_project().list_units()
-
-
-@app.post("/api/units")
-def add_unit(req: NameReq, operator: str = Depends(get_operator)):
-    try:
-        uid = get_project().add_unit(req.name, operator)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"id": uid}
-
-
-@app.patch("/api/units/{unit_id}")
-def rename_unit(unit_id: int, req: NameReq, operator: str = Depends(get_operator)):
-    try:
-        get_project().rename_unit(unit_id, req.name, operator)
-    except (KeyError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"ok": True}
-
-
-@app.delete("/api/units/{unit_id}")
-def delete_unit(unit_id: int, operator: str = Depends(get_operator)):
-    try:
-        proj = get_project()
-        _require_project_idle(proj)
-        proj.delete_unit(unit_id, operator)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except ValueError as e:
-        # 跨单位引用保护：附件正被其他单位底稿引用
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"ok": True}
+# D01：先拆出无副作用的项目预设路由；路由工厂复用现有会话依赖，保持 v1.2
+# 的 URL、方法和响应不变，后续按相同模式继续拆分项目、单位、底稿等模块。
+app.include_router(build_settings_router(get_project, get_operator))
+app.include_router(build_units_router(get_project, get_operator, _require_project_idle))
 
 
 # ───────────────────────── 底稿 ─────────────────────────
@@ -744,6 +730,16 @@ def add_issue(unit_id: int, req: IssueReq, operator: str = Depends(get_operator)
     return {"id": iid}
 
 
+@app.put("/api/units/{unit_id}/issues/order")
+def reorder_issues(unit_id: int, req: OrderReq, operator: str = Depends(get_operator)):
+    """保存单位内底稿的完整拖放顺序；编号和版本链保持不变。"""
+    try:
+        changed = get_project().reorder_issues(unit_id, req.ids, operator)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=404 if isinstance(exc, KeyError) else 400, detail=str(exc)) from exc
+    return {"changed": changed}
+
+
 @app.get("/api/issues/tree")
 def issue_tree(_: str = Depends(get_operator)):
     """V3 问题树：全项目底稿按单位分组，一次请求返回，避免前端 N+1 查询。"""
@@ -758,6 +754,45 @@ def get_issue(issue_id: int, _: str = Depends(get_operator)):
     return iss
 
 
+@app.post("/api/issues/{issue_id}/duplicate")
+def duplicate_issue(issue_id: int, req: DuplicateIssueReq, operator: str = Depends(get_operator)):
+    """从当前正文快速新建草稿；不复制附件、版本、状态或交流记录。"""
+    try:
+        return get_project().duplicate_issue(issue_id, operator, req.unit_id)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=404 if isinstance(exc, KeyError) else 400, detail=str(exc)) from exc
+
+
+@app.get("/api/workpaper-templates")
+def list_workpaper_templates(_: str = Depends(get_operator)):
+    return get_project().list_workpaper_templates()
+
+
+@app.post("/api/workpaper-templates")
+def create_workpaper_template(req: WorkpaperTemplateCreateReq, operator: str = Depends(get_operator)):
+    try:
+        return get_project().create_workpaper_template(req.name, req.issue_id, operator)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=404 if isinstance(exc, KeyError) else 400, detail=str(exc)) from exc
+
+
+@app.post("/api/workpaper-templates/{template_id}/apply")
+def apply_workpaper_template(template_id: int, req: WorkpaperTemplateApplyReq, operator: str = Depends(get_operator)):
+    try:
+        return get_project().create_issue_from_template(template_id, req.unit_id, operator)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=404 if isinstance(exc, KeyError) else 400, detail=str(exc)) from exc
+
+
+@app.delete("/api/workpaper-templates/{template_id}")
+def delete_workpaper_template(template_id: int, operator: str = Depends(get_operator)):
+    try:
+        get_project().delete_workpaper_template(template_id, operator)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True}
+
+
 @app.patch("/api/issues/{issue_id}")
 def update_issue(issue_id: int, req: IssueReq, operator: str = Depends(get_operator)):
     try:
@@ -768,6 +803,45 @@ def update_issue(issue_id: int, req: IssueReq, operator: str = Depends(get_opera
         status_code = 404 if isinstance(e, KeyError) else 400
         raise HTTPException(status_code=status_code, detail=str(e))
     return {"changed": changed, "issue": get_project().get_issue(issue_id)}
+
+
+@app.post("/api/issues/batch-metadata/preflight")
+def batch_issue_metadata_preflight(req: BatchIssueMetadataReq, _: str = Depends(get_operator)):
+    """批量元数据只读预检：明确影响范围后生成一次性确认令牌。"""
+    try:
+        result = get_project().preflight_batch_issue_metadata(req.issue_ids, req.changes)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=404 if isinstance(exc, KeyError) else 400, detail=str(exc)) from exc
+    ctx = _ctx_var.get()
+    assert ctx is not None
+    token = uuid.uuid4().hex
+    ctx.batch_issue_preflights[token] = {
+        "project_uuid": get_project().project_uuid,
+        "issue_ids": result["issue_ids"], "changes": result["changes"],
+        "fingerprint": result.pop("fingerprint"), "expires_at": time.monotonic() + 10 * 60,
+    }
+    result["confirmation_token"] = token
+    return result
+
+
+@app.post("/api/issues/batch-metadata")
+def batch_issue_metadata_update(req: BatchIssueMetadataReq, operator: str = Depends(get_operator)):
+    """令牌、项目和底稿快照一致时，事务内批量维护白名单元数据。"""
+    ctx = _ctx_var.get()
+    assert ctx is not None
+    approved = ctx.batch_issue_preflights.pop(req.confirmation_token.strip(), None)
+    if not approved or approved["expires_at"] < time.monotonic():
+        raise HTTPException(status_code=409, detail="批量维护预检已失效，请重新预检")
+    proj = get_project()
+    if approved["project_uuid"] != proj.project_uuid or approved["issue_ids"] != req.issue_ids or approved["changes"] != req.changes:
+        raise HTTPException(status_code=409, detail="批量维护内容已变化，请重新预检")
+    try:
+        current = proj.preflight_batch_issue_metadata(req.issue_ids, req.changes)
+        if current["fingerprint"] != approved["fingerprint"]:
+            raise HTTPException(status_code=409, detail="所选底稿已变化，请重新预检后再提交")
+        return proj.batch_update_issue_metadata(req.issue_ids, req.changes, operator)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=404 if isinstance(exc, KeyError) else 400, detail=str(exc)) from exc
 
 
 @app.post("/api/issues/{issue_id}/status")
@@ -1022,7 +1096,14 @@ def unlinked_files(unit_id: int, _: str = Depends(get_operator)):
     return get_project().unlinked_files(unit_id)
 
 
-@app.api_route("/api/units/{unit_id}/attachments/open", methods=["GET", "POST"])
+@app.get(
+    "/api/units/{unit_id}/attachments/open",
+    operation_id="open_unit_attachment_directory_get",
+)
+@app.post(
+    "/api/units/{unit_id}/attachments/open",
+    operation_id="open_unit_attachment_directory_post",
+)
 def open_unit_attachment_directory(unit_id: int, operator: str = Depends(get_operator)):
     """在系统文件管理器中打开单位附件库。
 
@@ -1042,7 +1123,14 @@ def open_unit_attachment_directory(unit_id: int, operator: str = Depends(get_ope
     return {"ok": True}
 
 
-@app.api_route("/api/files/{file_id}/directory/open", methods=["GET", "POST"])
+@app.get(
+    "/api/files/{file_id}/directory/open",
+    operation_id="open_evidence_folder_get",
+)
+@app.post(
+    "/api/files/{file_id}/directory/open",
+    operation_id="open_evidence_folder_post",
+)
 def open_evidence_folder(file_id: int, operator: str = Depends(get_operator)):
     """打开“文件夹证据”自身目录，而不是错误地下载或跳到单位根目录。"""
     proj = get_project()
@@ -1319,97 +1407,6 @@ def clear_exclusive(file_id: int, operator: str = Depends(get_operator)):
 @app.get("/api/logs")
 def list_logs(limit: int = 500, _: str = Depends(get_operator)):
     return get_project().list_logs(max(1, min(limit, 5000)))
-
-
-# ───────────────────────── 版块 / 问题分类预设 ─────────────────────────
-
-@app.get("/api/settings/departments")
-def get_departments(_: str = Depends(get_operator)):
-    """读取项目版块预设（存 meta，随项目走）。"""
-    proj = get_project()
-    raw = proj.get_meta("departments", "[]")
-    try:
-        val = json.loads(raw)
-        return val if isinstance(val, list) else []
-    except (json.JSONDecodeError, TypeError):
-        return []
-
-
-@app.post("/api/settings/departments")
-def set_departments(req: DeptReq, operator: str = Depends(get_operator)):
-    """保存项目版块预设。"""
-    proj = get_project()
-    depts = [d.strip() for d in req.departments if d.strip()]
-    # 去重保序
-    seen = set()
-    uniq = [d for d in depts if not (d in seen or seen.add(d))]
-    proj.set_meta_with_log(
-        "departments", json.dumps(uniq, ensure_ascii=False), operator,
-        "更新版块预设", f"{len(uniq)} 个版块：{'、'.join(uniq[:5])}",
-    )
-    return uniq
-
-
-@app.get("/api/settings/issue-number")
-def get_issue_number(_: str = Depends(get_operator)):
-    """读取底稿编号规则（前缀/后缀，默认空 = 纯数字序号）。"""
-    proj = get_project()
-    return {
-        "prefix": proj.get_meta("issue_number_prefix", ""),
-        "suffix": proj.get_meta("issue_number_suffix", ""),
-    }
-
-
-@app.post("/api/settings/issue-number")
-def set_issue_number(req: IssueNumberReq, operator: str = Depends(get_operator)):
-    """保存底稿编号规则：编号 = 前缀 + 数字序号 + 后缀。
-
-    规则写入 meta（数据层），树/详情/导出台账/归档打包统一经 issue_no()
-    计算当前展示编号；永久关联使用 issue_uuid。前后缀变更不追溯，
-    删除后的数字可复用；默认前后缀为空 = 纯数字序号。
-    """
-    proj = get_project()
-    return proj.save_issue_number_rule(operator, req.prefix.strip(), req.suffix.strip())
-
-
-@app.get("/api/settings/categories")
-def get_categories(_: str = Depends(get_operator)):
-    """读取项目问题分类预设（存 meta，随项目走）。"""
-    raw = get_project().get_meta("categories", "[]")
-    try:
-        value = json.loads(raw)
-        return value if isinstance(value, list) else []
-    except (json.JSONDecodeError, TypeError):
-        return []
-
-
-@app.api_route("/api/settings/categories", methods=["POST", "PUT"])
-def set_categories(req: CategoryReq, operator: str = Depends(get_operator)):
-    """保存项目问题分类预设。"""
-    proj = get_project()
-    categories = [item.strip() for item in req.categories if item.strip()]
-    seen = set()
-    unique = [item for item in categories if not (item in seen or seen.add(item))]
-    proj.set_meta_with_log(
-        "categories", json.dumps(unique, ensure_ascii=False), operator,
-        "更新问题分类预设", f"{len(unique)} 个分类：{'、'.join(unique[:5])}",
-    )
-    return unique
-
-
-@app.get("/api/settings/amount")
-def get_amount_settings(_: str = Depends(get_operator)):
-    return get_project().get_amount_settings()
-
-
-@app.api_route("/api/settings/amount", methods=["POST", "PUT"])
-def save_amount_settings(req: AmountSettingsReq, operator: str = Depends(get_operator)):
-    try:
-        return get_project().save_amount_settings(
-            operator, currency=req.currency, amount_unit=req.amount_unit,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 # ───────────────────────── 导入问题汇总 ─────────────────────────

@@ -25,6 +25,8 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath
 from typing import ClassVar
 
+from rich_text import rich_html_to_plain_text, sanitize_rich_html
+
 DB_FILE = "audit.db"
 ATTACH_DIR = "附件库"
 OUT_DIR = "输出"
@@ -44,8 +46,11 @@ SNAPSHOT_DIR = "快照"
 # - v12 每条交流修订直接绑定其生成的底稿版本，供版本时间线与修订定位可靠联动
 # - v13 为 v12 前已保存的交流修订回填版本绑定，避免旧项目时间线无法联动
 # - v14 交流修订按“结束本轮”批量固化为一个版本，而非每次保存生成版本
+# - v15 为三个长文本字段增加受控富文本存储；纯文本投影继续用于检索、导出和交流
+# - v16 增加项目级资料请求台账；请求可关联单位、底稿和已提供附件
+# - v17 增加项目内底稿模板；模板只复用正文元数据，不承载人员、状态、证据或历史
 # - 打开时若项目 schema_version > 当前 → 拒绝（项目由更新版本创建，需升级程序）
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 17
 SCHEMA_VERSION_KEY = "schema_version"
 PROJECT_UUID_KEY = "project_uuid"
 DEFAULT_BACKUP_INTERVAL_MINUTES = 6 * 60
@@ -58,14 +63,110 @@ MAX_BACKUP_RETENTION_DAYS = 3650
 # 文件不是业务资料；例如 .secret、.well-known 或隐藏目录中的合同均须完整保存。
 SYSTEM_METADATA_NAMES = {".DS_Store"}
 
+
+class _SerializedCursor:
+    """为共享 SQLite 连接的游标操作补上同一把可重入锁。
+
+    FastAPI 请求线程和项目任务工作线程共用一个项目连接。SQLite 本身支持
+    ``check_same_thread=False``，但 Python 3.14 下不同线程同时推进同一连接的
+    cursor 会触发 ``sqlite3.InterfaceError``。这里将 execute、fetch 和迭代都
+    串行化，同时不在附件复制、压缩等长时间文件操作期间占住数据库锁。
+    """
+
+    def __init__(self, cursor: sqlite3.Cursor, lock: threading.RLock):
+        self._cursor = cursor
+        self._lock = lock
+
+    def __getattr__(self, name):
+        value = getattr(self._cursor, name)
+        if not callable(value):
+            return value
+
+        def locked_call(*args, **kwargs):
+            with self._lock:
+                return value(*args, **kwargs)
+
+        return locked_call
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        with self._lock:
+            return next(self._cursor)
+
+
+class _SerializedConnection:
+    """使单项目 SQLite 连接的所有数据库调用遵循 ``AuditProject._lock``。"""
+
+    def __init__(self, connection: sqlite3.Connection, lock: threading.RLock):
+        self._connection = connection
+        self._lock = lock
+
+    @property
+    def row_factory(self):
+        return self._connection.row_factory
+
+    @row_factory.setter
+    def row_factory(self, value) -> None:
+        self._connection.row_factory = value
+
+    def __enter__(self):
+        self._lock.acquire()
+        try:
+            self._connection.__enter__()
+        except Exception:
+            self._lock.release()
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        try:
+            self._connection.__exit__(exc_type, exc_value, traceback)
+        finally:
+            self._lock.release()
+
+    def execute(self, *args, **kwargs) -> _SerializedCursor:
+        with self._lock:
+            return _SerializedCursor(self._connection.execute(*args, **kwargs), self._lock)
+
+    def executemany(self, *args, **kwargs) -> _SerializedCursor:
+        with self._lock:
+            return _SerializedCursor(self._connection.executemany(*args, **kwargs), self._lock)
+
+    def executescript(self, *args, **kwargs) -> _SerializedCursor:
+        with self._lock:
+            return _SerializedCursor(self._connection.executescript(*args, **kwargs), self._lock)
+
+    def commit(self) -> None:
+        with self._lock:
+            self._connection.commit()
+
+    def backup(self, *args, **kwargs) -> None:
+        with self._lock:
+            self._connection.backup(*args, **kwargs)
+
+    def close(self) -> None:
+        with self._lock:
+            self._connection.close()
+
 # 底稿内容字段（更新白名单 + 版本快照范围）。``seq`` 是单位内可复用编号，
 # 不作为永久实体标识；前后缀只是当前显示规则，变更不追溯保存历史。
 ISSUE_FIELDS = [
-    "department", "category", "defect_type", "defect_desc", "amount",
-    "amount_minor", "currency", "amount_unit", "regulation_basis", "suggestion",
+    "department", "category", "defect_type", "defect_desc", "defect_desc_rich", "amount",
+    "amount_minor", "currency", "amount_unit", "regulation_basis", "regulation_basis_rich", "suggestion", "suggestion_rich",
     "author", "reviewer", "status",
 ]
+TEMPLATE_FIELDS = [
+    "department", "category", "defect_type", "defect_desc", "amount", "currency", "amount_unit",
+    "regulation_basis", "suggestion",
+]
 _TEXT_ISSUE_FIELDS = set(ISSUE_FIELDS) - {"amount_minor"}
+_RICH_TEXT_FIELD_MAP = {
+    "defect_desc_rich": "defect_desc",
+    "regulation_basis_rich": "regulation_basis",
+    "suggestion_rich": "suggestion",
+}
 _AMOUNT_UNITS = ("元", "万元", "亿元")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 EXCHANGE_REVISION_FIELDS = (
@@ -116,7 +217,10 @@ class AuditProject:
         # API 层在项目打开后注入实际 OS 账户；纯数据层/历史调用保持空值兼容。
         self._actor_uid = ""
         self._device_id = ""
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._conn = _SerializedConnection(
+            sqlite3.connect(self.db_path, check_same_thread=False),
+            self._lock,
+        )
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         # 合并/导入换库交换窗口标记（I2）：交换期间读请求短暂等待而非命中已关闭连接
@@ -195,12 +299,15 @@ class AuditProject:
                     category        TEXT DEFAULT '',
                     defect_type     TEXT DEFAULT '',
                     defect_desc     TEXT DEFAULT '',
+                    defect_desc_rich TEXT DEFAULT '',
                     amount          TEXT DEFAULT '',
                     amount_minor    INTEGER,
                     currency        TEXT DEFAULT '',
                     amount_unit     TEXT DEFAULT '',
                     regulation_basis TEXT DEFAULT '',
+                    regulation_basis_rich TEXT DEFAULT '',
                     suggestion      TEXT DEFAULT '',
+                    suggestion_rich TEXT DEFAULT '',
                     author          TEXT DEFAULT '',
                     reviewer        TEXT DEFAULT '',
                     status          TEXT DEFAULT '草稿',
@@ -211,6 +318,20 @@ class AuditProject:
                     CHECK (status IN ('草稿', '编制完成', '复核退回', '已复核', '已归档'))
                 );
                 CREATE INDEX IF NOT EXISTS idx_issues_unit ON issues(unit_id);
+
+                -- 项目内模板仅保存可复用的底稿正文/元数据快照。人员、状态、附件、
+                -- 版本、交流和单位均不属于模板，避免跨单位复用时带入错误责任或证据范围。
+                CREATE TABLE IF NOT EXISTS workpaper_templates(
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    template_uuid TEXT NOT NULL UNIQUE,
+                    name        TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    snapshot    TEXT NOT NULL,
+                    created_by  TEXT NOT NULL,
+                    created_at  TEXT NOT NULL,
+                    updated_by  TEXT NOT NULL,
+                    updated_at  TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_workpaper_templates_updated ON workpaper_templates(updated_at DESC, id DESC);
 
                 CREATE TABLE IF NOT EXISTS issue_versions(
                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -401,6 +522,26 @@ class AuditProject:
                     CHECK (status IN ('open', 'provided', 'verified', 'withdrawn'))
                 );
                 CREATE INDEX IF NOT EXISTS idx_exchange_requests_session ON exchange_requests(session_uuid, created_at);
+
+                CREATE TABLE IF NOT EXISTS project_requests(
+                    request_uuid TEXT PRIMARY KEY,
+                    unit_id INTEGER REFERENCES units(id) ON DELETE SET NULL,
+                    issue_id INTEGER REFERENCES issues(id) ON DELETE SET NULL,
+                    title TEXT NOT NULL,
+                    detail TEXT DEFAULT '',
+                    responsible TEXT DEFAULT '',
+                    due_date TEXT DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'open',
+                    provided_file_id INTEGER REFERENCES files(id) ON DELETE SET NULL,
+                    note TEXT DEFAULT '',
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_by TEXT DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    CHECK (status IN ('open', 'provided', 'verified', 'withdrawn'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_project_requests_status_due ON project_requests(status, due_date, created_at);
+                CREATE INDEX IF NOT EXISTS idx_project_requests_unit ON project_requests(unit_id, issue_id);
                 """
             )
             # 迁移：旧库 files 表补充 exclusive_to 列（仅关联模式）
@@ -431,6 +572,9 @@ class AuditProject:
                 "amount_minor": "INTEGER",
                 "currency": "TEXT DEFAULT ''",
                 "amount_unit": "TEXT DEFAULT ''",
+                "defect_desc_rich": "TEXT DEFAULT ''",
+                "regulation_basis_rich": "TEXT DEFAULT ''",
+                "suggestion_rich": "TEXT DEFAULT ''",
                 "deleted_at": "TEXT",
                 "deleted_by": "TEXT DEFAULT ''",
             })
@@ -654,12 +798,12 @@ class AuditProject:
                     "idx_issues_active_unit", "idx_files_active_unit", "idx_files_active_sha",
                 ):
                     self._conn.execute(f"DROP INDEX IF EXISTS {index}")
-                # ``exchange_*`` 是本次启动中由 CREATE TABLE IF NOT EXISTS 新建的
+                # ``exchange_*`` / ``project_requests`` 是本次启动中由 CREATE TABLE IF NOT EXISTS 新建的
                 # 表，但在重命名 issues/files 时 SQLite 会把它们的外键目标改写为
                 # ``*_v8_legacy``。一旦旧表删除，旧项目会因此无法打开。把所有依赖
                 # 表一起重建，且下面按列名复制，兼容早期候选版已有交流记录。
                 legacy_tables = (
-                    "exchange_comments", "exchange_requests", "exchange_revisions", "exchange_sessions",
+                    "project_requests", "exchange_comments", "exchange_requests", "exchange_revisions", "exchange_sessions",
                     "issue_files", "issue_versions", "files", "issues", "units",
                 )
                 for table in legacy_tables:
@@ -677,9 +821,10 @@ class AuditProject:
                         unit_id INTEGER NOT NULL REFERENCES units(id) ON DELETE RESTRICT,
                         seq INTEGER NOT NULL, issue_code TEXT DEFAULT '', sort_order INTEGER DEFAULT 0,
                         department TEXT DEFAULT '', category TEXT DEFAULT '', defect_type TEXT DEFAULT '',
-                        defect_desc TEXT DEFAULT '', amount TEXT DEFAULT '', amount_minor INTEGER,
+                        defect_desc TEXT DEFAULT '', defect_desc_rich TEXT DEFAULT '', amount TEXT DEFAULT '', amount_minor INTEGER,
                         currency TEXT DEFAULT '', amount_unit TEXT DEFAULT '', regulation_basis TEXT DEFAULT '',
-                        suggestion TEXT DEFAULT '', author TEXT DEFAULT '', reviewer TEXT DEFAULT '',
+                        regulation_basis_rich TEXT DEFAULT '', suggestion TEXT DEFAULT '', suggestion_rich TEXT DEFAULT '',
+                        author TEXT DEFAULT '', reviewer TEXT DEFAULT '',
                         status TEXT DEFAULT '草稿', deleted_at TEXT, deleted_by TEXT DEFAULT '',
                         created_at TEXT, updated_at TEXT,
                         CHECK (status IN ('草稿', '编制完成', '复核退回', '已复核', '已归档'))
@@ -757,6 +902,23 @@ class AuditProject:
                         updated_at TEXT,
                         CHECK (status IN ('open', 'provided', 'verified', 'withdrawn'))
                     );
+                    CREATE TABLE project_requests(
+                        request_uuid TEXT PRIMARY KEY,
+                        unit_id INTEGER REFERENCES units(id) ON DELETE SET NULL,
+                        issue_id INTEGER REFERENCES issues(id) ON DELETE SET NULL,
+                        title TEXT NOT NULL,
+                        detail TEXT DEFAULT '',
+                        responsible TEXT DEFAULT '',
+                        due_date TEXT DEFAULT '',
+                        status TEXT NOT NULL DEFAULT 'open',
+                        provided_file_id INTEGER REFERENCES files(id) ON DELETE SET NULL,
+                        note TEXT DEFAULT '',
+                        created_by TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_by TEXT DEFAULT '',
+                        updated_at TEXT NOT NULL,
+                        CHECK (status IN ('open', 'provided', 'verified', 'withdrawn'))
+                    );
                     """
                 )
                 # 绝不能用 ``INSERT INTO table SELECT *``：v1.1 的新增列都追加在
@@ -767,7 +929,8 @@ class AuditProject:
                     "units": "id, unit_uuid, name, sort_order, deleted_at, deleted_by, created_at",
                     "issues": (
                         "id, issue_uuid, unit_id, seq, issue_code, sort_order, department, category, defect_type, "
-                        "defect_desc, amount, amount_minor, currency, amount_unit, regulation_basis, suggestion, "
+                        "defect_desc, defect_desc_rich, amount, amount_minor, currency, amount_unit, regulation_basis, "
+                        "regulation_basis_rich, suggestion, suggestion_rich, "
                         "author, reviewer, status, deleted_at, deleted_by, created_at, updated_at"
                     ),
                     "issue_versions": "id, issue_id, version_no, snapshot, saved_by, created_at",
@@ -791,6 +954,10 @@ class AuditProject:
                         "request_uuid, session_uuid, content, status, provided_file_id, note, created_by, created_at, "
                         "updated_by, updated_at"
                     ),
+                    "project_requests": (
+                        "request_uuid, unit_id, issue_id, title, detail, responsible, due_date, status, provided_file_id, "
+                        "note, created_by, created_at, updated_by, updated_at"
+                    ),
                 }
                 for table, columns in copy_columns.items():
                     self._conn.execute(
@@ -813,6 +980,8 @@ class AuditProject:
                     CREATE INDEX idx_exchange_revisions_version ON exchange_revisions(version_id);
                     CREATE INDEX idx_exchange_comments_session ON exchange_comments(session_uuid, created_at);
                     CREATE INDEX idx_exchange_requests_session ON exchange_requests(session_uuid, created_at);
+                    CREATE INDEX idx_project_requests_status_due ON project_requests(status, due_date, created_at);
+                    CREATE INDEX idx_project_requests_unit ON project_requests(unit_id, issue_id);
                     """
                 )
                 violations = self._conn.execute("PRAGMA foreign_key_check").fetchall()
@@ -1389,6 +1558,36 @@ class AuditProject:
             self._conn.execute("UPDATE units SET name=? WHERE id=?", (new_name, unit_id))
             self._log_in_transaction(operator, "重命名单位", f"{old['name']} → {new_name}")
 
+    @staticmethod
+    def _validate_full_order(ids, current_ids: list[int], label: str) -> list[int]:
+        """校验拖放提交的是当前作用域的完整排列，拒绝静默丢项。"""
+        ordered_ids = list(ids)
+        if len(ordered_ids) != len(current_ids) or len(set(ordered_ids)) != len(ordered_ids):
+            raise ValueError(f"{label}排序必须包含当前全部对象且不能重复")
+        if set(ordered_ids) != set(current_ids):
+            raise ValueError(f"{label}排序包含不存在、已删除或不属于当前范围的对象")
+        return ordered_ids
+
+    def reorder_units(self, ordered_unit_ids, operator: str) -> bool:
+        """按完整拖放顺序重排被审单位；不改变单位稳定 ID 或附件目录。"""
+        with self._lock, self._conn:
+            rows = self._conn.execute(
+                "SELECT id, name FROM units WHERE deleted_at IS NULL ORDER BY sort_order, id"
+            ).fetchall()
+            current_ids = [row["id"] for row in rows]
+            ids = self._validate_full_order(ordered_unit_ids, current_ids, "被审单位")
+            if ids == current_ids:
+                return False
+            names = {row["id"]: row["name"] for row in rows}
+            self._conn.executemany(
+                "UPDATE units SET sort_order=? WHERE id=?",
+                [(index, unit_id) for index, unit_id in enumerate(ids)],
+            )
+            summary = "、".join(names[unit_id] for unit_id in ids[:5])
+            more = "" if len(ids) <= 5 else f" 等 {len(ids)} 个"
+            self._log_in_transaction(operator, "调整单位排序", f"{summary}{more}")
+        return True
+
     def cross_unit_refs(self, unit_id: int) -> list[dict]:
         """查本单位附件被哪些其他单位底稿引用（审查 F-01 修复）。
 
@@ -1563,11 +1762,13 @@ class AuditProject:
                 "units": self._conn.execute("SELECT COUNT(*) FROM units").fetchone()[0],
                 "issues": self._conn.execute("SELECT COUNT(*) FROM issues").fetchone()[0],
                 "files": self._conn.execute("SELECT COUNT(*) FROM files").fetchone()[0],
+                "requests": self._conn.execute("SELECT COUNT(*) FROM project_requests").fetchone()[0],
                 "recycled": self._conn.execute(
                     "SELECT COUNT(*) FROM recycle_bin WHERE restored_at IS NULL AND purged_at IS NULL"
                 ).fetchone()[0],
             }
             self._conn.execute("DELETE FROM issue_files")
+            self._conn.execute("DELETE FROM project_requests")
             self._conn.execute("DELETE FROM files")
             self._conn.execute("DELETE FROM issue_versions")
             self._conn.execute("DELETE FROM issues")
@@ -1578,7 +1779,7 @@ class AuditProject:
                 operator,
                 "重置项目",
                 "清空全部业务数据",
-                "单位 {units} 个、底稿 {issues} 条、附件 {files} 个、回收站条目 {recycled} 条；"
+                "单位 {units} 个、底稿 {issues} 条、附件 {files} 个、资料请求 {requests} 条、回收站条目 {recycled} 条；"
                 "历史操作日志永久保留".format(**counts),
             )
         # 附件库与输出目录的物理文件清空（保留目录本身）
@@ -1602,7 +1803,7 @@ class AuditProject:
                 SELECT issue_id, COUNT(*) AS file_count FROM issue_files GROUP BY issue_id
             ) AS file_counts ON file_counts.issue_id=i.id
             WHERE i.unit_id=? AND i.deleted_at IS NULL
-            ORDER BY i.seq
+            ORDER BY i.sort_order, i.id
             """,
             (unit_id,),
         ).fetchall()
@@ -1623,7 +1824,7 @@ class AuditProject:
                 SELECT issue_id, COUNT(*) AS file_count FROM issue_files GROUP BY issue_id
             ) AS file_counts ON file_counts.issue_id=i.id
             WHERE i.deleted_at IS NULL AND u.deleted_at IS NULL
-            ORDER BY u.sort_order, u.id, i.seq, i.id
+            ORDER BY u.sort_order, u.id, i.sort_order, i.id
             """
         ).fetchall()
         grouped: dict[int, list[dict]] = {}
@@ -1633,10 +1834,10 @@ class AuditProject:
         return grouped
 
     def summary(self) -> dict:
-        """三维汇总（T8）：按状态 / 按版块 / 按单位 + 问题明细列表。
+        """项目汇总：以底稿明细为主体，附带中性的项目数据概览。
 
-        返回 {by_status, by_dept, by_unit, total, issues}，数量与明细一致（汇总数=明细数）。
-        issues 供问题清单视图展示与跳转。
+        保留原三维汇总字段以兼容导出和旧界面，同时返回 ``dashboard`` 作为轻量项目
+        数据概览。概览只陈列已登记的底稿、附件和日志，不推断审计结论或流程待办。
         """
         # 三组 SQL 聚合替代“每单位再查底稿/附件”的 2N+1 查询。
         with self._lock:
@@ -1653,9 +1854,16 @@ class AuditProject:
                 "WHERE i.deleted_at IS NULL AND u.deleted_at IS NULL "
                 "GROUP BY COALESCE(NULLIF(TRIM(i.department),''), '未分版块')"
             ).fetchall()
+            category_rows = self._conn.execute(
+                "SELECT COALESCE(NULLIF(TRIM(i.category),''), '未分类') name, COUNT(*) count "
+                "FROM issues i JOIN units u ON u.id=i.unit_id "
+                "WHERE i.deleted_at IS NULL AND u.deleted_at IS NULL "
+                "GROUP BY COALESCE(NULLIF(TRIM(i.category),''), '未分类')"
+            ).fetchall()
             unit_rows = self._conn.execute(
-                "SELECT u.name, COUNT(DISTINCT i.id) issues, COUNT(DISTINCT f.id) files "
-                "FROM units u LEFT JOIN issues i ON i.unit_id=u.id AND i.deleted_at IS NULL LEFT JOIN files f ON f.unit_id=u.id "
+                "SELECT u.id, u.name, COUNT(DISTINCT i.id) issues, COUNT(DISTINCT f.id) files "
+                "FROM units u LEFT JOIN issues i ON i.unit_id=u.id AND i.deleted_at IS NULL "
+                "LEFT JOIN files f ON f.unit_id=u.id AND f.deleted_at IS NULL "
                 "WHERE u.deleted_at IS NULL "
                 "GROUP BY u.id, u.name ORDER BY u.sort_order, u.id"
             ).fetchall()
@@ -1667,18 +1875,55 @@ class AuditProject:
                 "LEFT JOIN (SELECT issue_id, COUNT(*) AS file_count FROM issue_files GROUP BY issue_id) "
                 "AS file_counts ON file_counts.issue_id=i.id "
                 "WHERE i.deleted_at IS NULL AND u.deleted_at IS NULL "
-                "ORDER BY u.sort_order, u.id, i.seq"
+                "ORDER BY u.sort_order, u.id, i.sort_order, i.id"
+            ).fetchall()
+            file_stats = self._conn.execute(
+                """SELECT COUNT(*) files_total,
+                          SUM(CASE WHEN EXISTS (
+                              SELECT 1 FROM issue_files x JOIN issues i ON i.id=x.issue_id
+                              WHERE x.file_id=f.id AND i.deleted_at IS NULL
+                          ) THEN 1 ELSE 0 END) linked_files
+                   FROM files f JOIN units u ON u.id=f.unit_id
+                   WHERE f.deleted_at IS NULL AND u.deleted_at IS NULL"""
+            ).fetchone()
+            recent_rows = self._conn.execute(
+                "SELECT operator, action, target, created_at FROM audit_log ORDER BY id DESC LIMIT 6"
             ).fetchall()
         by_status = {row["name"]: row["count"] for row in status_rows}
         by_dept = {row["name"]: row["count"] for row in dept_rows}
+        by_category = {row["name"]: row["count"] for row in category_rows}
         by_unit = {row["name"]: {"issues": row["issues"], "files": row["files"]} for row in unit_rows}
         total = sum(by_status.values())
+        issues = [dict(row) for row in issue_rows]
+        empty_units = [row for row in unit_rows if not int(row["issues"] or 0)]
+        files_total = int(file_stats["files_total"] or 0)
+        linked_files = int(file_stats["linked_files"] or 0)
         return {
             "by_status": by_status,
             "by_dept": by_dept,
+            "by_category": by_category,
             "by_unit": by_unit,
             "total": total,
-            "issues": [dict(row) for row in issue_rows],
+            "issues": issues,
+            "dashboard": {
+                "overview": {
+                    "units": len(unit_rows), "issues": total, "files": files_total,
+                    "units_with_issues": len(unit_rows) - len(empty_units),
+                    "departments": len(by_dept), "categories": len(by_category),
+                },
+                "evidence": {
+                    "files_total": files_total, "linked_files": linked_files,
+                    "unlinked_files": files_total - linked_files,
+                    "issues_with_evidence": sum(1 for issue in issues if int(issue["file_count"] or 0) > 0),
+                },
+                "units": [
+                    {
+                        "id": row["id"], "name": row["name"], "issues": row["issues"], "files": row["files"],
+                    }
+                    for row in unit_rows
+                ],
+                "recent_activity": [dict(row) for row in recent_rows],
+            },
         }
 
     def search(self, q: str) -> dict:
@@ -1773,6 +2018,7 @@ class AuditProject:
         if not self.get_unit(unit_id):
             raise KeyError(f"单位不存在: {unit_id}")
         data = {k: str(fields.get(k, "") or "") for k in _TEXT_ISSUE_FIELDS}
+        self._normalize_rich_text_fields(data, fields)
         structured_amount = any(key in fields and fields[key] is not None for key in ("currency", "amount_unit", "amount_minor"))
         data.update(self._normalize_amount_fields(fields, require_structured=structured_amount))
         # 新建底稿必须从草稿开始，禁止调用方通过 POST/导入绕过状态机直接伪造已复核或已归档状态。
@@ -1800,6 +2046,229 @@ class AuditProject:
             )
         return iid
 
+    def duplicate_issue(self, issue_id: int, operator: str, target_unit_id: int | None = None) -> dict:
+        """复制正文和元数据为新草稿，绝不复制证据、版本、状态或交流记录。"""
+        source = self.get_issue(issue_id)
+        if not source:
+            raise KeyError("源底稿不存在")
+        unit_id = int(target_unit_id or source["unit_id"])
+        if not self.get_unit(unit_id):
+            raise KeyError("目标被审计单位不存在")
+        fields = {
+            key: source.get(key, "")
+            for key in ("department", "category", "defect_type", "defect_desc", "amount", "currency", "amount_unit", "regulation_basis", "suggestion", "author", "reviewer")
+        }
+        # 富文本功能临时下线，复制只使用纯文本字段，避免把停用功能的格式状态带入新稿。
+        copied_id = self.add_issue(unit_id, operator, **fields)
+        copied = self.get_issue(copied_id)
+        assert copied is not None
+        with self._lock, self._conn:
+            self._log_in_transaction(
+                operator,
+                "复制底稿",
+                self._issue_target(unit_id, copied["seq"], copied),
+                f"来源：{self._issue_target(source['unit_id'], source['seq'], source)}；未复制附件、版本、状态和交流记录",
+                issue_uuid=str(copied.get("issue_uuid") or ""),
+            )
+        return copied
+
+    # ───────────────────────── 项目内底稿模板 ─────────────────────────
+
+    @staticmethod
+    def _normalize_template_name(name: str) -> str:
+        normalized = str(name or "").strip()
+        if not normalized:
+            raise ValueError("模板名称不能为空")
+        if len(normalized) > 100:
+            raise ValueError("模板名称不能超过 100 个字符")
+        return normalized
+
+    @staticmethod
+    def _template_snapshot(issue: dict) -> dict:
+        """模板只复用通用编制内容，绝不夹带人员、状态、证据或内部实体标识。"""
+        return {field: issue.get(field, "") for field in TEMPLATE_FIELDS}
+
+    @staticmethod
+    def _template_record(row: sqlite3.Row) -> dict:
+        data = json.loads(str(row["snapshot"] or "{}"))
+        if not isinstance(data, dict):
+            raise ValueError("底稿模板数据损坏，请从可信备份恢复")
+        return {
+            "id": int(row["id"]),
+            "template_uuid": str(row["template_uuid"]),
+            "name": str(row["name"]),
+            "data": {field: str(data.get(field, "") or "") for field in TEMPLATE_FIELDS},
+            "created_by": str(row["created_by"]),
+            "created_at": str(row["created_at"]),
+            "updated_by": str(row["updated_by"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    def list_workpaper_templates(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM workpaper_templates ORDER BY updated_at DESC, id DESC"
+        ).fetchall()
+        return [self._template_record(row) for row in rows]
+
+    def create_workpaper_template(self, name: str, source_issue_id: int, operator: str) -> dict:
+        name = self._normalize_template_name(name)
+        source = self.get_issue(source_issue_id)
+        if not source:
+            raise KeyError("源底稿不存在")
+        now = _now()
+        snapshot = json.dumps(self._template_snapshot(source), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        with self._lock, self._conn:
+            try:
+                cur = self._conn.execute(
+                    "INSERT INTO workpaper_templates(template_uuid,name,snapshot,created_by,created_at,updated_by,updated_at) VALUES(?,?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), name, snapshot, operator, now, operator, now),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("模板名称已存在，请换一个名称") from exc
+            row = self._conn.execute("SELECT * FROM workpaper_templates WHERE id=?", (cur.lastrowid,)).fetchone()
+            assert row is not None
+            self._log_in_transaction(
+                operator, "保存底稿模板", f"底稿模板：{name}",
+                f"来源：{self._issue_target(int(source['unit_id']), int(source['seq']), source)}；不包含人员、状态、附件、版本和交流记录",
+                issue_uuid=str(source.get("issue_uuid") or ""),
+            )
+        return self._template_record(row)
+
+    def create_issue_from_template(self, template_id: int, unit_id: int, operator: str) -> dict:
+        if not self.get_unit(unit_id):
+            raise KeyError("目标被审计单位不存在")
+        row = self._conn.execute("SELECT * FROM workpaper_templates WHERE id=?", (template_id,)).fetchone()
+        if not row:
+            raise KeyError("底稿模板不存在")
+        template = self._template_record(row)
+        # 人员信息由实际创建人重新开始，避免旧项目组成员被带入新的责任链。
+        issue_id = self.add_issue(unit_id, operator, **template["data"], author=operator, reviewer="")
+        issue = self.get_issue(issue_id)
+        assert issue is not None
+        with self._lock, self._conn:
+            self._log_in_transaction(
+                operator, "按模板新建底稿", self._issue_target(unit_id, int(issue["seq"]), issue),
+                f"模板：{template['name']}；未复制附件、状态、历史和交流记录",
+                issue_uuid=str(issue.get("issue_uuid") or ""),
+            )
+        return issue
+
+    def delete_workpaper_template(self, template_id: int, operator: str) -> None:
+        row = self._conn.execute("SELECT * FROM workpaper_templates WHERE id=?", (template_id,)).fetchone()
+        if not row:
+            raise KeyError("底稿模板不存在")
+        template = self._template_record(row)
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM workpaper_templates WHERE id=?", (template_id,))
+            self._log_in_transaction(operator, "删除底稿模板", f"底稿模板：{template['name']}")
+
+    # ───────────────────────── 项目级资料请求 ─────────────────────────
+
+    @staticmethod
+    def _request_due_date(value: str) -> str:
+        value = str(value or "").strip()
+        if not value:
+            return ""
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("截止日格式应为 YYYY-MM-DD") from exc
+
+    def list_project_requests(self) -> list[dict]:
+        rows = self._conn.execute(
+            """SELECT r.*, u.name AS unit_name, i.seq AS issue_seq, i.defect_type AS issue_type,
+                      f.orig_name AS provided_file_name
+               FROM project_requests r
+               LEFT JOIN units u ON u.id=r.unit_id
+               LEFT JOIN issues i ON i.id=r.issue_id
+               LEFT JOIN files f ON f.id=r.provided_file_id
+               ORDER BY CASE r.status WHEN 'open' THEN 0 WHEN 'provided' THEN 1 WHEN 'verified' THEN 2 ELSE 3 END,
+                        CASE WHEN r.due_date='' THEN 1 ELSE 0 END, r.due_date, r.created_at DESC"""
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_project_request(self, operator: str, *, title: str, detail: str = "", responsible: str = "", due_date: str = "", unit_id: int | None = None, issue_id: int | None = None) -> dict:
+        title = str(title or "").strip()
+        if not title:
+            raise ValueError("资料请求事项不能为空")
+        if len(title) > 300 or len(str(detail or "")) > 10000:
+            raise ValueError("资料请求内容过长")
+        unit_id = int(unit_id) if unit_id else None
+        issue_id = int(issue_id) if issue_id else None
+        if unit_id and not self.get_unit(unit_id):
+            raise KeyError("被审计单位不存在")
+        if issue_id:
+            issue = self.get_issue(issue_id)
+            if not issue:
+                raise KeyError("关联底稿不存在")
+            if unit_id and int(issue["unit_id"]) != unit_id:
+                raise ValueError("关联底稿不属于所选被审计单位")
+            unit_id = int(issue["unit_id"])
+        now, request_uuid = _now(), str(uuid.uuid4())
+        with self._lock, self._conn:
+            self._conn.execute("INSERT INTO project_requests(request_uuid,unit_id,issue_id,title,detail,responsible,due_date,created_by,created_at,updated_by,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (request_uuid,unit_id,issue_id,title,str(detail or "").strip(),str(responsible or "").strip(),self._request_due_date(due_date),operator,now,operator,now))
+            self._log_in_transaction(operator, "新建资料请求", title, f"责任人：{responsible or '未指定'}；截止日：{due_date or '未指定'}")
+        return next(item for item in self.list_project_requests() if item["request_uuid"] == request_uuid)
+
+    def update_project_request(self, request_uuid: str, operator: str, *, status: str | None = None, note: str | None = None, provided_file_id: int | None = None) -> dict:
+        row = self._conn.execute("SELECT * FROM project_requests WHERE request_uuid=?", (request_uuid,)).fetchone()
+        if not row:
+            raise KeyError("资料请求不存在")
+        updates: dict[str, object] = {}
+        if status is not None:
+            if status not in {"open", "provided", "verified", "withdrawn"}:
+                raise ValueError("资料请求状态无效")
+            transitions = {
+                "open": {"provided", "withdrawn"},
+                "provided": {"open", "verified", "withdrawn"},
+                "verified": {"open"},
+                "withdrawn": {"open"},
+            }
+            current_status = str(row["status"])
+            if status != current_status and status not in transitions[current_status]:
+                raise ValueError(f"资料请求不能从 {current_status} 直接变更为 {status}")
+            updates["status"] = status
+        if note is not None:
+            updates["note"] = str(note).strip()
+        if provided_file_id is not None:
+            file = self.get_file(provided_file_id)
+            if not file:
+                raise KeyError("关联附件不存在")
+            if row["unit_id"] and int(file["unit_id"]) != int(row["unit_id"]):
+                raise ValueError("关联附件不属于该被审计单位")
+            updates["provided_file_id"] = provided_file_id
+        next_status = str(updates.get("status") or row["status"])
+        next_file_id = updates.get("provided_file_id", row["provided_file_id"])
+        if next_status in {"provided", "verified"} and row["unit_id"] and not next_file_id:
+            raise ValueError("标记已提供或已核验前，请关联该单位的已提供附件")
+        if updates:
+            updates.update(updated_by=operator, updated_at=_now())
+            with self._lock, self._conn:
+                self._conn.execute("UPDATE project_requests SET " + ", ".join(f"{key}=?" for key in updates) + " WHERE request_uuid=?", (*updates.values(), request_uuid))
+                self._log_in_transaction(operator, "更新资料请求", str(row["title"]), "；".join(f"{key}={value}" for key, value in updates.items() if key not in {"updated_by", "updated_at"}))
+        return next(item for item in self.list_project_requests() if item["request_uuid"] == request_uuid)
+
+    def reorder_issues(self, unit_id: int, ordered_issue_ids, operator: str) -> bool:
+        """按完整拖放顺序重排一个单位下的底稿，不改动底稿编号 ``seq``。"""
+        with self._lock, self._conn:
+            unit = self.get_unit(unit_id)
+            if not unit:
+                raise KeyError(f"单位不存在: {unit_id}")
+            rows = self._conn.execute(
+                "SELECT id, seq FROM issues WHERE unit_id=? AND deleted_at IS NULL ORDER BY sort_order, id",
+                (unit_id,),
+            ).fetchall()
+            current_ids = [row["id"] for row in rows]
+            ids = self._validate_full_order(ordered_issue_ids, current_ids, "底稿")
+            if ids == current_ids:
+                return False
+            self._conn.executemany(
+                "UPDATE issues SET sort_order=? WHERE id=? AND unit_id=? AND deleted_at IS NULL",
+                [(index, issue_id, unit_id) for index, issue_id in enumerate(ids)],
+            )
+            self._log_in_transaction(operator, "调整底稿排序", f"{unit['name']}：{len(ids)} 条底稿")
+        return True
+
     @staticmethod
     def _has_meaningful_issue_content(data: dict) -> bool:
         """仅业务内容都为空的底稿不生成版本，避免无意义的空初稿。"""
@@ -1822,6 +2291,7 @@ class AuditProject:
         # 只接受白名单字段，且仅写显式传入的（不把未提交字段当空串写回）；status 除外
         updates = {k: str(v or "") for k, v in fields.items()
                    if k in _TEXT_ISSUE_FIELDS and k != "status" and v is not None}
+        self._normalize_rich_text_fields(updates, fields)
         structured_amount = any(key in fields and fields[key] is not None for key in ("currency", "amount_unit", "amount_minor"))
         if structured_amount:
             updates.update(self._normalize_amount_fields(fields, require_structured=True))
@@ -1858,6 +2328,108 @@ class AuditProject:
                 f"修改字段：{'、'.join(changed)}", issue_uuid=str(old.get("issue_uuid") or ""),
             )
         return True
+
+    _BATCH_METADATA_FIELDS = {"department", "category", "author", "reviewer"}
+
+    def preflight_batch_issue_metadata(self, issue_ids: list[int], changes: dict) -> dict:
+        """只读核对批量元数据修改范围；拒绝归档、删除或跨项目的底稿。"""
+        ids = [int(issue_id) for issue_id in issue_ids]
+        if not ids or len(ids) > 500 or len(set(ids)) != len(ids):
+            raise ValueError("请一次选择 1 至 500 条且不重复的底稿")
+        normalized = {
+            str(key): str(value or "").strip()
+            for key, value in (changes or {}).items()
+            if str(key) in self._BATCH_METADATA_FIELDS
+        }
+        if not normalized or len(normalized) != len(changes or {}):
+            raise ValueError("批量维护仅支持所属版块、问题分类、编制人和复核人")
+        if any(len(value) > 200 for value in normalized.values()):
+            raise ValueError("批量维护的字段内容不得超过 200 字")
+        marks = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            f"SELECT id, unit_id, seq, issue_uuid, defect_type, status, updated_at, department, category, author, reviewer "
+            f"FROM issues WHERE id IN ({marks}) AND deleted_at IS NULL", ids,
+        ).fetchall()
+        by_id = {int(row["id"]): dict(row) for row in rows}
+        missing = [issue_id for issue_id in ids if issue_id not in by_id]
+        if missing:
+            raise KeyError(f"底稿不存在或已删除：{missing[0]}")
+        archived = [issue_id for issue_id in ids if by_id[issue_id]["status"] == self.STATUS_ARCHIVED]
+        if archived:
+            raise ValueError(f"所选底稿含已归档记录，不能批量直接修改：{archived[0]}")
+        changed_ids = [
+            issue_id for issue_id in ids
+            if any(normalized[field] != str(by_id[issue_id].get(field) or "") for field in normalized)
+        ]
+        reviewed = [issue_id for issue_id in changed_ids if by_id[issue_id]["status"] == self.STATUS_REVIEWED]
+        fingerprint = "|".join(
+            f"{issue_id}:{by_id[issue_id]['updated_at']}:{by_id[issue_id]['status']}" for issue_id in ids
+        )
+        return {
+            "issue_ids": ids, "changes": normalized, "selected": len(ids), "affected": len(changed_ids),
+            "unchanged": len(ids) - len(changed_ids), "reviewed": len(reviewed), "fingerprint": fingerprint,
+            "issues": [
+                {"id": issue_id, "unit_id": by_id[issue_id]["unit_id"], "seq": by_id[issue_id]["seq"],
+                 "defect_type": by_id[issue_id]["defect_type"], "status": by_id[issue_id]["status"]}
+                for issue_id in ids
+            ],
+        }
+
+    def batch_update_issue_metadata(self, issue_ids: list[int], changes: dict, operator: str) -> dict:
+        """事务内批量维护白名单元数据，并为每条发生变化的底稿写入版本快照。"""
+        preflight = self.preflight_batch_issue_metadata(issue_ids, changes)
+        ids, normalized = preflight["issue_ids"], preflight["changes"]
+        if not preflight["affected"]:
+            return {"updated": 0, "unchanged": preflight["unchanged"], "issue_ids": []}
+        marks = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            f"SELECT * FROM issues WHERE id IN ({marks}) AND deleted_at IS NULL", ids,
+        ).fetchall()
+        by_id = {int(row["id"]): dict(row) for row in rows}
+        now, updated_ids = _now(), []
+        with self._lock, self._conn:
+            for issue_id in ids:
+                old = by_id[issue_id]
+                updates = {field: value for field, value in normalized.items() if value != str(old.get(field) or "")}
+                if not updates:
+                    continue
+                if old.get("status") == self.STATUS_REVIEWED:
+                    updates["status"] = self.STATUS_SUBMITTED
+                data = {key: old[key] for key in ISSUE_FIELDS}
+                data.update(updates)
+                version_no = self._conn.execute(
+                    "SELECT COALESCE(MAX(version_no),0)+1 FROM issue_versions WHERE issue_id=?", (issue_id,)
+                ).fetchone()[0]
+                self._conn.execute(
+                    "INSERT INTO issue_versions(issue_id, version_no, snapshot, saved_by, created_at) VALUES(?,?,?,?,?)",
+                    (issue_id, version_no, json.dumps(data, ensure_ascii=False), operator, now),
+                )
+                assignments = ", ".join(f"{field}=?" for field in updates)
+                self._conn.execute(
+                    f"UPDATE issues SET {assignments}, updated_at=? WHERE id=?",
+                    (*updates.values(), now, issue_id),
+                )
+                updated_ids.append(issue_id)
+            self._log_in_transaction(
+                operator, "批量维护底稿元数据", f"{len(updated_ids)} 条底稿",
+                f"字段：{'、'.join(normalized)}；底稿 ID：{','.join(str(issue_id) for issue_id in updated_ids)}",
+            )
+        return {"updated": len(updated_ids), "unchanged": preflight["unchanged"], "issue_ids": updated_ids}
+
+    @staticmethod
+    def _normalize_rich_text_fields(data: dict, fields: dict) -> None:
+        """规范富文本，并同步更新其纯文本投影。
+
+        前端只要提交 ``*_rich``，富文本视图就是唯一来源；旧版调用方仅提交纯文本
+        时清空对应富文本，避免陈旧排版覆盖新的普通文本修改。
+        """
+        for rich_field, plain_field in _RICH_TEXT_FIELD_MAP.items():
+            if rich_field in fields and fields[rich_field] is not None:
+                rich_value = sanitize_rich_html(str(fields[rich_field] or ""))
+                data[rich_field] = rich_value
+                data[plain_field] = rich_html_to_plain_text(rich_value)
+            elif plain_field in fields and fields[plain_field] is not None:
+                data[rich_field] = ""
 
     def delete_issue(self, issue_id: int, operator: str):
         """移入回收站而非物理删除；附件、关联和版本均随底稿保留以便恢复。"""
@@ -2154,6 +2726,7 @@ class AuditProject:
             }, require_structured=True))
         else:
             data[field] = value
+            self._normalize_rich_text_fields(data, {field: value})
         if issue.get("status") == self.STATUS_REVIEWED:
             data["status"] = self.STATUS_SUBMITTED
         with self._lock, self._conn:
@@ -2451,6 +3024,11 @@ class AuditProject:
         # 历史快照没有结构化金额字段时沿用当前值，避免“恢复文本旧版本”
         # 意外清空后来补录的币种/单位。
         restored = {k: snap[k] if k in snap else cur[k] for k in ISSUE_FIELDS}
+        # 早期纯文本快照恢复后不能沿用当前富文本排版，否则页面会显示与该历史
+        # 版本不同的内容。旧快照的纯文本字段仍是恢复来源，富文本安全回退为空。
+        for rich_field, plain_field in _RICH_TEXT_FIELD_MAP.items():
+            if rich_field not in snap and plain_field in snap:
+                restored[rich_field] = ""
         restored["status"] = self.STATUS_SUBMITTED if current_status == self.STATUS_REVIEWED else current_status
         now = _now()
         with self._lock, self._conn:

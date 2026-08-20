@@ -122,6 +122,69 @@ def test_issue_attachment_counts_remain_correct_with_shared_files(proj, tmp_path
     assert grouped_files[second][0]["id"] == evidence["id"]
 
 
+def test_duplicate_issue_copies_content_but_not_evidence_versions_or_status(proj, tmp_path):
+    unit_id = proj.add_unit("华电集团XX电厂", "张三")
+    target_unit_id = proj.add_unit("华电集团YY电厂", "张三")
+    source_id = proj.add_issue(
+        unit_id, "张三", department="营销管理", category="经营管理", defect_type="电费回收不及时",
+        defect_desc="原始描述", regulation_basis="制度第 1 条", suggestion="立即整改", amount="120",
+    )
+    proj.change_status(source_id, "编制完成", "张三")
+    evidence_path = tmp_path / "合同.pdf"
+    evidence_path.write_bytes(b"contract")
+    evidence = proj.add_file(unit_id, evidence_path, "张三")
+    proj.link_file(source_id, evidence["id"], "张三")
+    source_versions = len(proj.list_versions(source_id))
+
+    copied = proj.duplicate_issue(source_id, "李四", target_unit_id)
+
+    assert copied["id"] != source_id
+    assert copied["unit_id"] == target_unit_id and copied["status"] == "草稿"
+    assert copied["defect_desc"] == "原始描述"
+    assert copied["regulation_basis"] == "制度第 1 条"
+    assert copied["suggestion"] == "立即整改"
+    assert proj.files_for_issue(copied["id"]) == []
+    assert len(proj.list_versions(source_id)) == source_versions
+    assert len(proj.list_versions(copied["id"])) == 1
+    logs = [log for log in proj.list_logs() if log["action"] == "复制底稿"]
+    assert logs and "华电集团XX电厂" in logs[-1]["detail"] and "未复制附件" in logs[-1]["detail"]
+
+
+def test_project_requests_link_scope_transition_and_reset(proj, tmp_path):
+    unit_id = proj.add_unit("华电集团XX电厂", "张三")
+    other_unit_id = proj.add_unit("华电集团YY电厂", "张三")
+    issue_id = proj.add_issue(unit_id, "张三", defect_type="银行存款函证")
+    evidence_path = tmp_path / "银行流水.pdf"
+    evidence_path.write_bytes(b"bank statement")
+    evidence = proj.add_file(unit_id, evidence_path, "张三")
+
+    request = proj.create_project_request(
+        "张三", title="提供银行流水", detail="2025 年全年", responsible="财务经理",
+        due_date="2026-08-31", issue_id=issue_id,
+    )
+    assert request["unit_id"] == unit_id
+    assert request["unit_name"] == "华电集团XX电厂"
+    assert request["issue_seq"] == 1
+    assert request["status"] == "open"
+
+    provided = proj.update_project_request(
+        request["request_uuid"], "李四", status="provided", note="已收电子版", provided_file_id=evidence["id"],
+    )
+    assert provided["status"] == "provided"
+    assert provided["provided_file_name"] == "银行流水.pdf"
+    assert proj.update_project_request(request["request_uuid"], "李四", status="verified")["status"] == "verified"
+    with pytest.raises(ValueError, match="不能从 verified 直接变更为 withdrawn"):
+        proj.update_project_request(request["request_uuid"], "李四", status="withdrawn")
+    with pytest.raises(ValueError, match="不属于所选被审计单位"):
+        proj.create_project_request("张三", title="错误关联", unit_id=other_unit_id, issue_id=issue_id)
+    with pytest.raises(ValueError, match="截止日格式"):
+        proj.create_project_request("张三", title="错误日期", due_date="2026/08/31")
+
+    proj.reset_all("张三")
+    assert proj.list_project_requests() == []
+    assert any(log["action"] == "重置项目" and "资料请求 1 条" in log["detail"] for log in proj.list_logs())
+
+
 def test_audit_log_trace(proj, tmp_path):
     uid = proj.add_unit("华电集团XX电厂", "张三")
     iid = proj.add_issue(uid, "张三", department="营销管理", defect_type="电费回收不及时")

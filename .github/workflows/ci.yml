@@ -14,17 +14,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22.12.0"
+          node-version: "24.19.0"
       - uses: pnpm/action-setup@v4
         with:
           version: "11.5.0"
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11.11"
-      - name: 构建 V3 前端（类型检查 + 生产构建）
+          python-version: "3.14.6"
+      - name: 安装 V3 前端依赖
         run: |
           pnpm --dir frontend-v3 install --frozen-lockfile
-          pnpm --dir frontend-v3 build
       - name: 安装依赖
         run: |
           python -m pip install --require-hashes -r requirements-dev.txt
@@ -32,6 +31,20 @@ jobs:
         run: ruff check .
       - name: 回归测试（pytest）
         run: pytest tests/ -q --disable-warnings
+      - name: OpenAPI 合同与前端类型检查
+        run: |
+          AUDIT_PYTHON=python pnpm --dir frontend-v3 check:api-types
+          pnpm --dir frontend-v3 typecheck
+      - name: 前端静态检查与纯逻辑测试
+        run: |
+          pnpm --dir frontend-v3 lint
+          pnpm --dir frontend-v3 test:logic
+      - name: 构建 V3 前端（生产构建）
+        run: pnpm --dir frontend-v3 build
+      - name: 依赖安全审计
+        run: |
+          pip-audit -r requirements.txt
+          pnpm --dir frontend-v3 audit --prod --registry=https://registry.npmjs.org
 
   build-windows:
     # Windows Server 2022 构建的 x64 onedir 包纳入 Windows 10 人工验收矩阵。
@@ -41,13 +54,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22.12.0"
+          node-version: "24.19.0"
       - uses: pnpm/action-setup@v4
         with:
           version: "11.5.0"
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11.11"
+          python-version: "3.14.6"
       - name: 构建 V3 前端
         run: |
           pnpm --dir frontend-v3 install --frozen-lockfile
@@ -72,7 +85,7 @@ jobs:
           Write-Host "冒烟测试: $($exe.FullName)"
           $p = Start-Process -FilePath $exe.FullName -PassThru
           $ok = $false
-          $endpointFile = "$env:USERPROFILE\.shenji\shenji-v11-upgrade.lock.endpoint.json"
+          $endpointFile = "$env:USERPROFILE\.shenji\audit-trail-v13.lock.endpoint.json"
           for ($i = 0; $i -lt 150; $i++) {
             Start-Sleep -Seconds 1
             # 新架构（启动器/服务分离）：启动器拉起服务子进程后即正常退出（exit 0），
@@ -129,75 +142,6 @@ jobs:
           name: 审迹-windows
           path: |
             dist/审迹-windows.zip
-            dist/manifest.txt
-          if-no-files-found: error
-          retention-days: 30
-
-  build-macos:
-    # GitHub `macos-14` 是 Apple Silicon runner；产品仅交付 arm64 macOS 包。
-    runs-on: macos-14
-    needs: lint-test
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22.12.0"
-      - uses: pnpm/action-setup@v4
-        with:
-          version: "11.5.0"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11.11"
-      - name: 验证 Apple Silicon 构建机
-        run: test "$(uname -m)" = "arm64"
-      - name: 构建 V3 前端
-        run: |
-          pnpm --dir frontend-v3 install --frozen-lockfile
-          pnpm --dir frontend-v3 build
-      - name: 安装依赖
-        run: |
-          python -m pip install --require-hashes -r requirements-dev.txt
-      - name: 用 spec 打包（与 Windows 同一入口）
-        run: pyinstaller --noconfirm 审迹.spec
-      - name: 校验产物存在
-        run: ls dist/ && test -d "dist/审迹.app"
-      - name: 启动冒烟测试（发布阻断门禁）
-        run: |
-          APP_BIN="dist/审迹.app/Contents/MacOS/审迹"
-          "$APP_BIN" > /tmp/audit-assistant-smoke.log 2>&1 &
-          APP_PID=$!
-          # 新架构（启动器/服务分离）：启动器拉起服务子进程后即正常退出，不能 kill -0 判失败；
-          # 退出时清掉服务子进程（--serve）
-          trap 'pkill -f "审迹.*--serve" 2>/dev/null || true' EXIT
-          OK=0
-          for i in $(seq 1 150); do
-            PORT=""
-            if [ -f "$HOME/.shenji/shenji-v11-upgrade.lock.endpoint.json" ]; then
-              PORT=$(python3 -c "import json;d=json.load(open('$HOME/.shenji/shenji-v11-upgrade.lock.endpoint.json'));print(d.get('port') or '')" 2>/dev/null)
-            fi
-            if [ -n "$PORT" ] && curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/" >/dev/null; then
-              OK=1
-              break
-            fi
-            sleep 1
-          done
-          if [ "$OK" -ne 1 ]; then
-            cat /tmp/audit-assistant-smoke.log
-            echo "服务未在 150 秒内就绪"
-            exit 1
-          fi
-          echo "macOS 冒烟测试通过: 服务 200 OK"
-      - name: 生成发布产物清单（版本 + sha256）
-        run: python scripts/release_manifest.py dist
-      - name: 压缩 .app（上传为 zip）
-        run: |
-          cd dist && ditto -c -k --sequesterRsrc --keepParent "审迹.app" "审迹-macos.zip"
-      - name: 上传 macOS 安装包
-        uses: actions/upload-artifact@v4
-        with:
-          name: 审迹-macos-arm64
-          path: |
-            dist/审迹-macos.zip
             dist/manifest.txt
           if-no-files-found: error
           retention-days: 30
