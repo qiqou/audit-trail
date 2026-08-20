@@ -1,14 +1,18 @@
 <script setup lang="ts">
 import { FolderOpened, SwitchButton } from "@element-plus/icons-vue";
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
+import { useRouter } from "vue-router";
 
 import { api, type HealthResult, type ProjectInfo, type Unit } from "./api/client";
+import { useRuntimeStore } from "./app/runtimeStore";
 import { APP_VERSION_LABEL } from "./version";
 
 // 项目列表/登录页不需要工作区和低频操作面板，打开项目时才加载，缩短首次启动等待。
 const IssueWorkspace = defineAsyncComponent(() => import("./components/IssueWorkspace.vue"));
 const ProjectOperations = defineAsyncComponent(() => import("./components/ProjectOperations.vue"));
+const router = useRouter();
+const runtimeStore = useRuntimeStore();
 
 type RecentProject = { path: string; name: string; time: number };
 type AutoSaveMode = "realtime" | "5m" | "20m";
@@ -79,6 +83,14 @@ let tabRenewTimer: ReturnType<typeof window.setInterval> | undefined;
 let sessionHeartbeatTimer: ReturnType<typeof window.setInterval> | undefined;
 
 const loggedIn = computed(() => Boolean(operator.value));
+
+// 路由只表达工作台层级，不承载项目正文或附件数据；刷新 /workspace 时也不会
+// 擅自恢复项目连接，避免浏览器状态与本机数据库会话出现错配。
+watch(project, (current) => {
+  const destination = current ? "workspace" : "home";
+  runtimeStore.setScreen(destination);
+  if (router.currentRoute.value.name !== destination) void router.replace({ name: destination });
+}, { immediate: true });
 
 function readTabLease(): TabLease | null {
   try {

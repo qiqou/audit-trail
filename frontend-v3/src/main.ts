@@ -1,6 +1,7 @@
 import "./styles.css";
 
 import { createApp } from "vue";
+import { createPinia } from "pinia";
 import {
   ElAlert,
   ElButton,
@@ -28,8 +29,11 @@ import "element-plus/es/components/select/style/css";
 import "element-plus/es/components/tag/style/css";
 
 import App from "./App.vue";
+import { router } from "./app/router";
 
 createApp(App)
+  .use(createPinia())
+  .use(router)
   .use(ElAlert)
   .use(ElButton)
   .use(ElDialog)
