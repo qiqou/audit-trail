@@ -22,12 +22,10 @@ from contextvars import ContextVar
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi import Depends, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 # 兼容两种启动方式：`python backend/main.py` 与 `uvicorn main:app`（根目录转发）
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -61,6 +59,7 @@ from api_models import (
     WorkpaperTemplateApplyReq,
     WorkpaperTemplateCreateReq,
 )
+from app import create_app, mount_frontend
 from app_launcher import launch_service, serve_app
 from config import PROJECT_EXT, RuntimeSettings
 from database import OUT_DIR, SYSTEM_METADATA_NAMES, AuditProject
@@ -81,7 +80,7 @@ from platform_adapter import (
 )
 from routers.settings import build_router as build_settings_router
 from routers.units import build_router as build_units_router
-from runtime_log import install_unhandled_error_handler, log_runtime_event
+from runtime_log import log_runtime_event
 
 SETTINGS = RuntimeSettings.from_environment()
 HOST = SETTINGS.host
@@ -133,17 +132,7 @@ def _folder_fingerprint(folder_files: list) -> str:
     parts.sort()
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
-app = FastAPI(title="审迹", docs_url="/api/docs", openapi_url="/api/openapi.json")
-
-
-@app.exception_handler(InterruptedError)
-async def _handle_interrupted(_request: Request, exc: InterruptedError) -> JSONResponse:
-    """I5：同步任务被取消或等待超时统一转 409，不再泄漏为 500。"""
-    return JSONResponse(status_code=409, content={"detail": str(exc) or "任务已取消"})
-# 仅监听回环地址不足以阻断 DNS rebinding：浏览器仍可能将 evil.example 的 Host
-# 请求送到本地端口。明确拒绝非本机 Host；testserver 仅供 FastAPI TestClient。
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
-install_unhandled_error_handler(app)
+app = create_app()
 
 # 会话表：token → 会话上下文（使用人 + 该会话打开的项目）。
 # 每个会话独立持有项目；同一项目同时只允许一个会话写入，避免第二标签页
@@ -1994,8 +1983,7 @@ def open_folder(req: FolderReq, _: str = Depends(get_operator)):
 
 # ───────────────────────── 静态资源（必须最后挂载） ─────────────────────────
 
-FRONTEND_DIR.mkdir(exist_ok=True)
-app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+mount_frontend(app, FRONTEND_DIR)
 
 
 @app.middleware("http")
