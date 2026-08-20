@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 
 from config import PROJECT_EXT
 from database import ATTACH_DIR, OUT_DIR, SYSTEM_METADATA_NAMES, AuditProject, _now, _safe
+from infra.exporters.archive_io import add_archive_dir, reserve_archive_path, write_streamed_archive_file
 from infra.exporters.confirmation_docx import write_confirmation_docx
 from infra.exporters.operational import write_audit_log_csv, write_diagnostics_support_package
 from infra.exporters.summary_excel import SUMMARY_HEADERS, build_summary_workbook, summary_excel_bytes
@@ -239,39 +240,17 @@ def export_issue_confirmation_docx(proj: AuditProject, issue: dict, unit_name: s
 
 def _add_archive_dir(zf: zipfile.ZipFile, path: str, reserved: set[str]) -> None:
     """写入空目录，保留无附件问题和空文件夹证据的既有归档结构。"""
-    normalized = path.strip("/")
-    if normalized and normalized not in reserved:
-        zf.writestr(f"{normalized}/", "")
-        reserved.add(normalized)
+    add_archive_dir(zf, path, reserved)
 
 
 def _unique_archive_path(parent: str, name: str, reserved: set[str]) -> str:
     """给归档内同名附件编号，语义与临时目录中的 ``_unique_path`` 保持一致。"""
-    safe_name = _safe(name)
-    candidate = f"{parent.rstrip('/')}/{safe_name}"
-    if candidate not in reserved:
-        reserved.add(candidate)
-        return candidate
-    suffix = Path(safe_name).suffix
-    stem = safe_name[:-len(suffix)] if suffix else safe_name
-    for index in range(1, 10_000):
-        candidate = f"{parent.rstrip('/')}/{stem}_{index}{suffix}"
-        if candidate not in reserved:
-            reserved.add(candidate)
-            return candidate
-    raise RuntimeError(f"无法生成唯一归档路径：{safe_name}")
+    return reserve_archive_path(parent, _safe(name), reserved)
 
 
 def _write_streamed_archive_file(zf: zipfile.ZipFile, source: Path, archive_path: str) -> tuple[int, str]:
     """一次读取源文件，同时压缩写入 ZIP 并计算清单摘要。"""
-    digest = hashlib.sha256()
-    size = 0
-    with source.open("rb") as src, zf.open(archive_path, "w", force_zip64=True) as dst:
-        while chunk := src.read(1 << 20):
-            dst.write(chunk)
-            digest.update(chunk)
-            size += len(chunk)
-    return size, digest.hexdigest()
+    return write_streamed_archive_file(zf, source, archive_path)
 
 
 def _write_folder_to_archive(zf: zipfile.ZipFile, source: Path, archive_root: str,
