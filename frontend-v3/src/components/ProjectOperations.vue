@@ -3,8 +3,10 @@ import { computed, onBeforeUnmount, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { storeToRefs } from "pinia";
 
-import { api, type AmountSettings, type ArchivePreflight, type AuditLog, type BatchIssueMetadataChanges, type BackupSettings, type ExcelImportPreflight, type ImportResult, type MergePreflight, type MergeResult, type ProjectInfo, type ProjectSummary, type RecycledFile, type RecycledIssue, type RecycledIssuePreview, type RecycledUnit, type RecoveryPoint, type ScanStatus, type SummaryIssue, type Unit } from "../api/client";
+import { api, type AmountSettings, type AuditLog, type BatchIssueMetadataChanges, type BackupSettings, type MergePreflight, type MergeResult, type ProjectInfo, type ProjectSummary, type RecycledFile, type RecycledIssue, type RecycledIssuePreview, type RecycledUnit, type RecoveryPoint, type ScanStatus, type SummaryIssue, type Unit } from "../api/client";
 import { useGlobalSearch } from "../features/projectOperations/useGlobalSearch";
+import { useArchiveOperation } from "../features/projectOperations/useArchiveOperation";
+import { useExcelTransferOperation } from "../features/projectOperations/useExcelTransferOperation";
 import { useJobStore } from "../app/jobStore";
 import { formatIssueNo } from "../format";
 
@@ -37,25 +39,15 @@ type Panel = "" | "import" | "export" | "package" | "backup" | "merge" | "restor
 
 const activePanel = ref<Panel>("");
 const working = ref(false);
-const importPicker = ref<HTMLInputElement | null>(null);
 const mergePicker = ref<HTMLInputElement | null>(null);
 const restorePicker = ref<HTMLInputElement | null>(null);
-const importFile = ref<File | null>(null);
 const mergeFiles = ref<File[]>([]);
 const mergeLocalPaths = ref("");
 const mergePreflight = ref<MergePreflight | null>(null);
 const restoreFile = ref<File | null>(null);
 const restoreLocalPath = ref("");
 const restoreTarget = ref("");
-const importResult = ref<ImportResult | null>(null);
-const importPreflight = ref<ExcelImportPreflight | null>(null);
 const mergeResult = ref<MergeResult | null>(null);
-const exportScope = ref<"project" | "unit">("project");
-const exportUnitId = ref<number | null>(null);
-const packageScope = ref<"all" | "selected">("all");
-const packageUnitIds = ref<number[]>([]);
-const groupByDepartment = ref(false);
-const archivePreflight = ref<ArchivePreflight | null>(null);
 const departmentName = ref("");
 const departmentDraft = ref<string[]>([]);
 const categoryName = ref("");
@@ -177,7 +169,6 @@ const summaryAllSelected = computed(() => summaryIssues.value.length > 0 && summ
   (issue) => selectedSummaryIssueIds.value.includes(issue.id),
 ));
 
-const selectedPackageCount = computed(() => packageScope.value === "all" ? props.units.length : packageUnitIds.value.length);
 const dialogTitles: Partial<Record<Panel, string>> = {
   import: "导入问题汇总（Excel）",
   export: "导出问题汇总表（Excel）",
@@ -207,6 +198,38 @@ function report(error: unknown): void {
   ElMessage.error(error instanceof Error ? error.message : "项目操作失败，请重试");
 }
 
+const {
+  archivePreflight,
+  clearArchivePreflight,
+  groupByDepartment,
+  initialize: initializeArchive,
+  packageProject,
+  packageScope,
+  packageUnitIds,
+  prepareArchivePreflight,
+  selectedPackageCount,
+  togglePackageUnit,
+} = useArchiveOperation({ units: () => props.units, working, report });
+const {
+  downloadTemplate,
+  exportExcel,
+  exportScope,
+  exportUnitId,
+  importExcel,
+  importFile,
+  importPicker,
+  importPreflight,
+  importResult,
+  initializeExport,
+  inputImportFile,
+  resetImport,
+} = useExcelTransferOperation({
+  units: () => props.units,
+  working,
+  report,
+  dataChanged: () => emit("dataChanged"),
+});
+
 const { searchQuery, searchResult, searchLoading, runSearch, onSearchInput, dispose: disposeGlobalSearch } = useGlobalSearch(report);
 
 function openSearch(): void {
@@ -217,10 +240,10 @@ function openSearch(): void {
 function show(panel: Panel | string): void {
   const target = panel as Panel;
   activePanel.value = target;
-  if (target === "import") importResult.value = null;
+  if (target === "import") resetImport();
   if (target === "merge") mergeResult.value = null;
-  if (target === "export" && !exportUnitId.value) exportUnitId.value = props.units[0]?.id ?? null;
-  if (target === "package" && !packageUnitIds.value.length) packageUnitIds.value = props.units.map((unit) => unit.id);
+  if (target === "export") initializeExport();
+  if (target === "package") initializeArchive();
   if (target === "restore") void loadRecoveryPoints();
 }
 
@@ -798,14 +821,8 @@ onBeforeUnmount(() => {
   disposeGlobalSearch();
 });
 
-function inputFile(event: Event, target: "import" | "restore"): void {
-  const file = (event.target as HTMLInputElement).files?.[0] ?? null;
-  if (target === "import") {
-    importFile.value = file;
-    importPreflight.value = null;
-    importResult.value = null;
-  }
-  else restoreFile.value = file;
+function inputRestoreFile(event: Event): void {
+  restoreFile.value = (event.target as HTMLInputElement).files?.[0] ?? null;
 }
 
 function inputMergeFiles(event: Event): void {
@@ -850,120 +867,6 @@ function downloadMergeReport(): void {
     "", "错误：", ...(result.errors.length ? result.errors : ["无"]),
   ];
   downloadText(`备份合并报告_${reportStamp()}.txt`, lines.join("\n"));
-}
-
-function togglePackageUnit(id: number, checked: boolean): void {
-  packageUnitIds.value = checked
-    ? [...new Set([...packageUnitIds.value, id])]
-    : packageUnitIds.value.filter((item) => item !== id);
-}
-
-async function downloadTemplate(): Promise<void> {
-  working.value = true;
-  try {
-    await api.importTemplate();
-    ElMessage.success("导入模板已下载，请填写后再导入");
-  } catch (error) {
-    report(error);
-  } finally {
-    working.value = false;
-  }
-}
-
-async function importExcel(): Promise<void> {
-  if (!importFile.value) {
-    ElMessage.warning("请选择按模板填写的 .xlsx 文件");
-    return;
-  }
-  working.value = true;
-  try {
-    importPreflight.value = await api.preflightExcelImport(importFile.value);
-    if (importPreflight.value.errors.length) {
-      ElMessage.warning(`预检发现 ${importPreflight.value.errors.length} 项错误，未写入项目`);
-      return;
-    }
-    await ElMessageBox.confirm(
-      `将新增 ${importPreflight.value.imported} 条底稿，并新建 ${importPreflight.value.new_units} 个单位。确认提交？`,
-      "Excel 导入预检通过",
-      { type: "warning", confirmButtonText: "确认提交", cancelButtonText: "取消" },
-    );
-    importResult.value = await api.commitExcelImport(importFile.value, importPreflight.value.confirmation_token);
-    emit("dataChanged");
-    ElMessage.success(`导入完成：${importResult.value.imported} 条底稿${importResult.value.skipped ? `，跳过 ${importResult.value.skipped} 条` : ""}`);
-  } catch (error) {
-    if (error !== "cancel") report(error);
-  } finally {
-    working.value = false;
-  }
-}
-
-async function exportExcel(): Promise<void> {
-  if (exportScope.value === "unit" && !exportUnitId.value) {
-    ElMessage.warning("请选择要导出的被审计单位");
-    return;
-  }
-  working.value = true;
-  try {
-    const result = await api.exportExcel(exportScope.value, exportUnitId.value ?? undefined);
-    await api.downloadUrl(result.download_url, result.filename);
-    ElMessage.success(`已导出 ${result.count} 条问题汇总`);
-  } catch (error) {
-    report(error);
-  } finally {
-    working.value = false;
-  }
-}
-
-async function packageProject(): Promise<void> {
-  if (!archivePreflight.value?.confirmation_token) {
-    await prepareArchivePreflight();
-    return;
-  }
-  if (packageScope.value === "selected" && !packageUnitIds.value.length) {
-    ElMessage.warning("请至少勾选一个被审计单位");
-    return;
-  }
-  working.value = true;
-  try {
-    const result = await api.packageProject(
-      packageScope.value === "selected" ? packageUnitIds.value : [],
-      groupByDepartment.value,
-      archivePreflight.value.confirmation_token,
-    );
-    await api.downloadUrl(result.download_url, result.filename);
-    archivePreflight.value = null;
-    ElMessage.success(`归档包已生成：${result.units} 个单位、${result.issues} 条底稿`);
-  } catch (error) {
-    report(error);
-  } finally {
-    working.value = false;
-  }
-}
-
-function clearArchivePreflight(): void {
-  archivePreflight.value = null;
-}
-
-async function prepareArchivePreflight(): Promise<void> {
-  if (packageScope.value === "selected" && !packageUnitIds.value.length) {
-    ElMessage.warning("请至少勾选一个被审计单位");
-    return;
-  }
-  working.value = true;
-  try {
-    archivePreflight.value = await api.packagePreflight(
-      packageScope.value === "selected" ? packageUnitIds.value : [], groupByDepartment.value,
-    );
-    if (archivePreflight.value.blockers.length) {
-      ElMessage.error(`归档已阻止：${archivePreflight.value.blockers.length} 项问题需要处理`);
-    } else {
-      ElMessage.success("归档核对完成，请确认清单后生成归档包");
-    }
-  } catch (error) {
-    report(error);
-  } finally {
-    working.value = false;
-  }
 }
 
 async function backupProject(): Promise<void> {
@@ -1319,7 +1222,7 @@ async function resetProject(): Promise<void> {
       <div v-else-if="activePanel === 'import'" class="operation-panel">
       <p>先下载模板。带 * 的三列为必填；不存在的被审计单位将自动创建。提交前会先在隔离副本预检，不会直接写入项目。</p>
       <div class="tool-actions"><el-button :loading="working" @click="downloadTemplate">下载 Excel 模板</el-button><el-button :loading="working" @click="importPicker?.click()">选择 .xlsx 文件</el-button><el-button type="primary" :loading="working" :disabled="!importFile" @click="importExcel">预检并提交</el-button></div>
-      <input ref="importPicker" class="hidden-input" type="file" accept=".xlsx" @change="inputFile($event, 'import')" />
+      <input ref="importPicker" class="hidden-input" type="file" accept=".xlsx" @change="inputImportFile" />
       <span v-if="importFile" class="selected-file">已选：{{ importFile.name }}</span>
       <div v-if="importPreflight && importPreflight.errors.length" class="operation-result"><strong>预检未通过：</strong>发现 {{ importPreflight.errors.length }} 项错误，项目未被修改。<ul><li v-for="error in importPreflight.errors.slice(0, 10)" :key="error">{{ error }}</li></ul></div>
       <div v-if="importResult" class="operation-result"><strong>导入结果：</strong>成功 {{ importResult.imported }} 条，跳过 {{ importResult.skipped }} 条，新建单位 {{ importResult.new_units }} 个。<ul v-if="importResult.errors.length"><li v-for="error in importResult.errors.slice(0, 10)" :key="error">{{ error }}</li></ul><el-button v-if="importResult.errors.length" text size="small" @click="downloadImportReport">下载完整导入报告</el-button></div>
@@ -1355,7 +1258,7 @@ async function resetProject(): Promise<void> {
       <div v-else-if="activePanel === 'restore'" class="operation-panel">
       <p>恢复只允许写入空目录或新目录，不会覆盖当前打开项目。恢复后目录自动加 <code>.auditproj</code> 后缀并隐藏，与新建项目一致。</p>
       <div class="tool-actions"><el-button :loading="working" @click="restorePicker?.click()">选择 .auditbak 文件</el-button><el-button :loading="working" @click="chooseRestoreTarget">选择恢复文件夹</el-button></div>
-      <input ref="restorePicker" class="hidden-input" type="file" accept=".auditbak" @change="inputFile($event, 'restore')" />
+      <input ref="restorePicker" class="hidden-input" type="file" accept=".auditbak" @change="inputRestoreFile" />
       <el-input v-model="restoreLocalPath" placeholder="或输入本机 .auditbak 文件完整路径（大于 800MB 时请用此方式）" />
       <el-input v-model="restoreTarget" placeholder="恢复目标目录（必须为空或不存在）" />
       <span v-if="restoreFile" class="selected-file">备份文件：{{ restoreFile.name }}</span>
