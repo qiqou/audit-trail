@@ -1,3 +1,5 @@
+import { HttpClient } from "../shared/api/http";
+
 export interface ProjectInfo {
   path: string;
   project_name: string;
@@ -465,35 +467,11 @@ export type IssueChanges = Pick<Issue,
 // 只提交纯文本列；后端会据此清除对应的旧富文本视图，避免旧排版覆盖新输入。
 export type IssuePatch = Partial<IssueChanges>;
 
-interface ApiErrorBody {
-  detail?: string;
-}
-
 class ApiClient {
-  private token = sessionStorage.getItem("audit_token") ?? "";
+  private readonly http = new HttpClient();
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const headers = new Headers(init.headers);
-    if (this.token) headers.set("X-Session", this.token);
-    if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
-      headers.set("Content-Type", "application/json");
-    }
-    let response: Response;
-    try {
-      response = await fetch(path, { ...init, headers });
-    } catch {
-      throw new Error("无法连接本地服务，请确认审迹已启动");
-    }
-    const body = (await response.json().catch(() => null)) as T | ApiErrorBody | null;
-    if (!response.ok) {
-      const message = (body as ApiErrorBody | null)?.detail ?? `请求失败（${response.status}）`;
-      if (message.includes("使用人会话无效")) {
-        this.clearSession();
-        window.dispatchEvent(new CustomEvent("audit-session-expired"));
-      }
-      throw new Error(message);
-    }
-    return body as T;
+    return this.http.request(path, init);
   }
 
   async login(operator: string): Promise<{ token: string; operator: string; account_id: string; device_id: string }> {
@@ -501,16 +479,12 @@ class ApiClient {
       method: "POST",
       body: JSON.stringify({ operator }),
     });
-    this.token = result.token;
-    sessionStorage.setItem("audit_token", result.token);
-    sessionStorage.setItem("audit_operator", result.operator);
+    this.http.setSession(result.token, result.operator);
     return result;
   }
 
   clearSession(): void {
-    this.token = "";
-    sessionStorage.removeItem("audit_token");
-    sessionStorage.removeItem("audit_operator");
+    this.http.clearSession();
   }
 
   currentSession(): Promise<{ operator: string; account_id: string; device_id: string; project_preempted?: boolean }> {
@@ -1102,31 +1076,7 @@ class ApiClient {
   }
 
   async downloadUrl(path: string, filename: string): Promise<void> {
-    const headers = new Headers();
-    if (this.token) headers.set("X-Session", this.token);
-    let response: Response;
-    try {
-      response = await fetch(path, { headers });
-    } catch {
-      throw new Error("无法连接本地服务，请确认审迹已启动");
-    }
-    if (!response.ok) {
-      const body = (await response.json().catch(() => null)) as ApiErrorBody | null;
-      const message = body?.detail ?? `下载失败（${response.status}）`;
-      if (message.includes("使用人会话无效")) {
-        this.clearSession();
-        window.dispatchEvent(new CustomEvent("audit-session-expired"));
-      }
-      throw new Error(message);
-    }
-    const objectUrl = URL.createObjectURL(await response.blob());
-    const link = document.createElement("a");
-    link.href = objectUrl;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    return this.http.downloadUrl(path, filename);
   }
 }
 
