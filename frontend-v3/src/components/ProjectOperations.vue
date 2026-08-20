@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
+import { storeToRefs } from "pinia";
 
 import { api, type AmountSettings, type ArchivePreflight, type AuditLog, type BatchIssueMetadataChanges, type BackupSettings, type ExcelImportPreflight, type ImportResult, type MergePreflight, type MergeResult, type ProjectInfo, type ProjectSummary, type RecycledFile, type RecycledIssue, type RecycledIssuePreview, type RecycledUnit, type RecoveryPoint, type ScanStatus, type SummaryIssue, type Unit } from "../api/client";
 import { useGlobalSearch } from "../features/projectOperations/useGlobalSearch";
+import { useJobStore } from "../app/jobStore";
 import { formatIssueNo } from "../format";
 
 type AutoSaveMode = "realtime" | "5m" | "20m";
@@ -83,7 +85,7 @@ const backupRetentionDays = ref(7);
 const backupMaxGiB = ref(100);
 const recoveryPoints = ref<RecoveryPoint[]>([]);
 const selectedRecoveryPointId = ref("");
-const scan = ref<ScanStatus | null>(null);
+const { scan } = storeToRefs(useJobStore());
 const projectNameDraft = ref("");
 let scanTimer: ReturnType<typeof window.setTimeout> | undefined;
 

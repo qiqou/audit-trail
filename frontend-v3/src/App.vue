@@ -10,6 +10,7 @@ import { useRuntimeStore } from "./app/runtimeStore";
 import { useSessionStore } from "./app/sessionStore";
 import { useProjectStore } from "./app/projectStore";
 import { useThemeStore, type Theme } from "./app/themeStore";
+import { useJobStore } from "./app/jobStore";
 import { createTabLease } from "./app/tabLease";
 import { useReferenceData } from "./features/projectContext/useReferenceData";
 import { APP_VERSION_LABEL } from "./version";
@@ -22,6 +23,7 @@ const runtimeStore = useRuntimeStore();
 const sessionStore = useSessionStore();
 const projectStore = useProjectStore();
 const themeStore = useThemeStore();
+const jobStore = useJobStore();
 const { operator } = storeToRefs(sessionStore);
 const { project, units, departments, categories, issueNumberRule } = storeToRefs(projectStore);
 const { theme } = storeToRefs(themeStore);
@@ -291,6 +293,7 @@ async function setProject(action: "open" | "create"): Promise<void> {
     project.value = action === "open"
       ? await api.openProject(projectPath.value.trim())
       : await api.createProject(projectPath.value.trim(), projectName.value.trim());
+    jobStore.clear();
     await refreshProjectReferenceData();
     await refreshRecent(); // 后端打开/创建时已自动记录
     health.value = null;
@@ -307,6 +310,7 @@ async function openRecent(recent: RecentProject): Promise<void> {
   opening.value = true;
   try {
     project.value = await api.openProject(recent.path);
+    jobStore.clear();
     await refreshProjectReferenceData();
     await refreshRecent(); // 后端打开时已自动更新记录时间
     health.value = null;
@@ -348,6 +352,7 @@ async function openRestoredProject(path: string): Promise<boolean> {
   if (workspace.value && !(await workspace.value.confirmCurrentLeave())) return false;
   try {
     project.value = await api.openProject(path);
+    jobStore.clear();
     await refreshProjectReferenceData();
     await refreshRecent(); // 后端打开时已自动记录
     health.value = null;
@@ -386,6 +391,7 @@ function handleWorkspaceTool(tool: "templates" | "shortcuts"): void {
 async function backToProjectList(force = false): Promise<void> {
   if (!force && workspace.value && !(await workspace.value.confirmCurrentLeave())) return;
   projectStore.clear();
+  jobStore.clear();
   health.value = null;
   projectPath.value = "";
   projectName.value = "";
@@ -402,6 +408,7 @@ function resetSession(showExpiredMessage = false): void {
   sessionStore.clearOperator();
   if (previousOperator) loginName.value = previousOperator;
   projectStore.clear();
+  jobStore.clear();
   health.value = null;
   if (showExpiredMessage) ElMessage.warning("本地服务已重启，使用人会话已失效，请重新进入工作台");
 }
