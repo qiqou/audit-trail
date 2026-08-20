@@ -21,7 +21,7 @@ def test_version_single_source():
     from version import APP_NAME, APP_VERSION, BUNDLE_ID
 
     assert APP_NAME == "审迹"
-    assert APP_VERSION == "1.2.0"
+    assert APP_VERSION == "1.3.0"
     assert BUNDLE_ID.startswith("com.")
     root = Path(__file__).resolve().parent.parent
     package = json.loads((root / "frontend-v3" / "package.json").read_text(encoding="utf-8"))
