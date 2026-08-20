@@ -6,6 +6,7 @@
 - 备份 .auditbak 落在项目上级目录（备份不应混入项目数据）
 """
 
+import csv
 import hashlib
 import io
 import json
@@ -289,6 +290,19 @@ def export_excel(proj: AuditProject, scope: str = "project", operator: str = "",
     # 防覆盖：同秒/同名已存在时自动追加序号（审查 F-04 修复）
     out_path = _unique_path(out_dir, filename)
     _summary_workbook(proj, rows, scope_desc, operator).save(out_path)
+    return {"filename": out_path.name, "abs_path": str(out_path), "count": len(rows)}
+
+
+def export_audit_log_csv(proj: AuditProject, rows: list[dict]) -> dict:
+    """导出已筛选的永久操作日志；保持字段稳定且不包含附件或正文内容。"""
+    out_dir = proj.root / OUT_DIR
+    out_dir.mkdir(exist_ok=True)
+    out_path = _unique_path(out_dir, f"操作日志_{_safe(proj.project_name)}_{_now_ts()}.csv")
+    fields = ("id", "created_at", "operator", "action", "target", "detail", "event_uuid", "issue_uuid", "file_uuid")
+    with out_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows({field: row.get(field, "") for field in fields} for row in rows)
     return {"filename": out_path.name, "abs_path": str(out_path), "count": len(rows)}
 
 

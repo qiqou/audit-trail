@@ -936,6 +936,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/logs/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Export Audit Logs
+         * @description 导出项目永久操作日志 CSV，供项目经理复核或支持留档。
+         */
+        post: operations["export_audit_logs_api_logs_export_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/meta": {
         parameters: {
             query?: never;
@@ -4227,6 +4247,46 @@ export interface operations {
         parameters: {
             query?: {
                 limit?: number;
+                actor?: string;
+                action?: string;
+                start_date?: string;
+                end_date?: string;
+            };
+            header?: {
+                "x-session"?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    export_audit_logs_api_logs_export_post: {
+        parameters: {
+            query?: {
+                actor?: string;
+                action?: string;
+                start_date?: string;
+                end_date?: string;
             };
             header?: {
                 "x-session"?: string;

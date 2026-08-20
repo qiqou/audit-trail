@@ -17,7 +17,8 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile
 
 def build_router(
     get_operator: Callable[..., str],
-    list_logs_action: Callable[[int, str], list[dict]],
+    list_logs_action: Callable[..., list[dict]],
+    export_audit_logs_action: Callable[..., dict],
     import_template_action: Callable[[str], Any],
     import_excel_action: Callable[..., Awaitable[dict]],
     import_merge_action: Callable[..., Awaitable[dict]],
@@ -45,8 +46,19 @@ def build_router(
     router = APIRouter()
 
     @router.get("/api/logs")
-    def list_logs(limit: int = 500, _: str = Depends(get_operator)):
-        return list_logs_action(limit, _)
+    def list_logs(
+        limit: int = 500, actor: str = "", action: str = "", start_date: str = "", end_date: str = "",
+        _: str = Depends(get_operator),
+    ):
+        return list_logs_action(limit, actor, action, start_date, end_date, _)
+
+    @router.post("/api/logs/export")
+    def export_audit_logs(
+        actor: str = "", action: str = "", start_date: str = "", end_date: str = "",
+        operator: str = Depends(get_operator),
+    ):
+        """导出项目永久操作日志 CSV，供项目经理复核或支持留档。"""
+        return export_audit_logs_action(actor, action, start_date, end_date, operator)
 
     @router.get("/api/import/template")
     def import_template(_: str = Depends(get_operator)):

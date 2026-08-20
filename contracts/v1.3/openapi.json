@@ -3730,6 +3730,46 @@
             }
           },
           {
+            "in": "query",
+            "name": "actor",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Actor",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "action",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Action",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Start Date",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "End Date",
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "x-session",
             "required": false,
@@ -3761,6 +3801,85 @@
           }
         },
         "summary": "List Logs"
+      }
+    },
+    "/api/logs/export": {
+      "post": {
+        "description": "导出项目永久操作日志 CSV，供项目经理复核或支持留档。",
+        "operationId": "export_audit_logs_api_logs_export_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "actor",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Actor",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "action",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Action",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Start Date",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "End Date",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-session",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Session",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export Audit Logs"
       }
     },
     "/api/meta": {

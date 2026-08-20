@@ -4008,9 +4008,29 @@ class AuditProject:
                 actor_uid=actor_uid, device_id=device_id,
             )
 
-    def list_logs(self, limit: int = 500) -> list[dict]:
+    def list_logs(
+        self, limit: int = 500, *, actor: str = "", action: str = "",
+        start_date: str = "", end_date: str = "",
+    ) -> list[dict]:
+        """读取永久操作日志，可按经办人、动作和自然日范围筛选。"""
+        clauses: list[str] = []
+        params: list[object] = []
+        if actor.strip():
+            clauses.append("operator LIKE ?")
+            params.append(f"%{actor.strip()}%")
+        if action.strip():
+            clauses.append("action LIKE ?")
+            params.append(f"%{action.strip()}%")
+        if start_date:
+            clauses.append("created_at >= ?")
+            params.append(f"{start_date} 00:00:00")
+        if end_date:
+            clauses.append("created_at <= ?")
+            params.append(f"{end_date} 23:59:59")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
         rows = self._conn.execute(
-            "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)
+            f"SELECT * FROM audit_log{where} ORDER BY id DESC LIMIT ?", params,
         ).fetchall()
         return [dict(r) for r in rows]
 

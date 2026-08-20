@@ -60,6 +60,10 @@ const issuePrefix = ref("");
 const issueSuffix = ref("");
 const summary = ref<ProjectSummary | null>(null);
 const logs = ref<AuditLog[]>([]);
+const logActor = ref("");
+const logAction = ref("");
+const logStartDate = ref("");
+const logEndDate = ref("");
 const recycledIssues = ref<RecycledIssue[]>([]);
 const recycledUnits = ref<RecycledUnit[]>([]);
 const recycledFiles = ref<RecycledFile[]>([]);
@@ -545,9 +549,28 @@ async function openLogs(): Promise<void> {
   show("logs");
   logs.value = [];
   try {
-    logs.value = await api.logs();
+    logs.value = await api.logs({
+      actor: logActor.value, action: logAction.value,
+      start_date: logStartDate.value, end_date: logEndDate.value,
+    });
   } catch (error) {
     report(error);
+  }
+}
+
+async function exportLogs(): Promise<void> {
+  working.value = true;
+  try {
+    const result = await api.exportAuditLogs({
+      actor: logActor.value, action: logAction.value,
+      start_date: logStartDate.value, end_date: logEndDate.value,
+    });
+    window.open(result.download_url, "_blank", "noopener,noreferrer");
+    ElMessage.success(`已导出 ${result.count} 条操作日志`);
+  } catch (error) {
+    report(error);
+  } finally {
+    working.value = false;
   }
 }
 
@@ -1253,7 +1276,8 @@ async function resetProject(): Promise<void> {
       </div>
 
       <div v-else-if="activePanel === 'logs'" class="operation-panel">
-        <div class="panel-head"><p>记录本项目内的新增、修改、导入、导出与状态流转操作。</p><el-button size="small" @click="openLogs">刷新</el-button></div>
+        <div class="panel-head"><p>记录本项目内的新增、修改、导入、导出与状态流转操作。</p><span><el-button size="small" @click="openLogs">刷新</el-button><el-button size="small" :loading="working" @click="exportLogs">导出 CSV</el-button></span></div>
+        <div class="tool-options"><el-input v-model="logActor" size="small" clearable placeholder="经办人" /><el-input v-model="logAction" size="small" clearable placeholder="操作类型" /><input v-model="logStartDate" type="date" aria-label="操作日志起始日期" /><span>至</span><input v-model="logEndDate" type="date" aria-label="操作日志结束日期" /><el-button size="small" @click="openLogs">筛选</el-button></div>
         <el-empty v-if="!logs.length" description="暂无操作日志" :image-size="58" />
         <div v-else class="log-list"><div v-for="entry in logs" :key="entry.id" class="log-row"><time>{{ entry.created_at }}</time><strong>{{ entry.operator }}</strong><span>{{ entry.action }}</span><span>{{ entry.target }}</span><small>{{ entry.detail }}</small></div></div>
       </div>

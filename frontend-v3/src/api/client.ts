@@ -100,6 +100,21 @@ export interface AuditLog {
   created_at: string;
 }
 
+export interface AuditLogFilters {
+  actor?: string;
+  action?: string;
+  start_date?: string;
+  end_date?: string;
+}
+
+function auditLogFilterParams(filters: AuditLogFilters): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value?.trim()) params.set(key, value);
+  }
+  return params.toString();
+}
+
 export interface ScanStatus {
   scan_id: string;
   status: "queued" | "running" | "done" | "cancelled" | "error";
@@ -501,6 +516,10 @@ class ApiClient {
     return this.request("/api/session", { method: "DELETE" });
   }
 
+  exportAuditLogs(filters: AuditLogFilters = {}): Promise<{ filename: string; abs_path: string; count: number; download_url: string }> {
+    return this.request(`/api/logs/export?${auditLogFilterParams(filters)}`, { method: "POST" });
+  }
+
   chooseFolder(): Promise<{ path: string; warning?: string }> {
     return this.request("/api/system/choose-folder", { method: "POST" });
   }
@@ -573,8 +592,8 @@ class ApiClient {
     return this.request(`/api/search?q=${encodeURIComponent(q)}`);
   }
 
-  logs(): Promise<AuditLog[]> {
-    return this.request("/api/logs");
+  logs(filters: AuditLogFilters = {}): Promise<AuditLog[]> {
+    return this.request(`/api/logs?${auditLogFilterParams(filters)}`);
   }
 
   departments(): Promise<string[]> {

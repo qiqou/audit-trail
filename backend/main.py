@@ -18,6 +18,7 @@ import threading
 import time
 import traceback
 import uuid
+from datetime import date
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
@@ -890,8 +891,44 @@ def clear_exclusive(file_id: int, operator: str = Depends(get_operator)):
 
 # ───────────────────────── 操作日志 ─────────────────────────
 
-def list_logs(limit: int = 500, _: str = Depends(get_operator)):
-    return get_project().list_logs(max(1, min(limit, 5000)))
+def _validate_log_date(value: str, label: str) -> str:
+    if not value:
+        return ""
+    try:
+        return date.fromisoformat(value).isoformat()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"{label}必须为 YYYY-MM-DD") from e
+
+
+def list_logs(
+    limit: int = 500, actor: str = "", action: str = "", start_date: str = "", end_date: str = "",
+    _: str = Depends(get_operator),
+):
+    start_date = _validate_log_date(start_date, "起始日期")
+    end_date = _validate_log_date(end_date, "结束日期")
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(status_code=400, detail="起始日期不得晚于结束日期")
+    return get_project().list_logs(
+        max(1, min(limit, 5000)), actor=actor, action=action,
+        start_date=start_date, end_date=end_date,
+    )
+
+
+def export_audit_logs(
+    actor: str = "", action: str = "", start_date: str = "", end_date: str = "",
+    operator: str = Depends(get_operator),
+):
+    """导出操作日志 CSV；导出动作本身在生成后留存永久日志。"""
+    from export import export_audit_log_csv
+
+    project = get_project()
+    rows = list_logs(5000, actor, action, start_date, end_date, operator)
+    info = export_audit_log_csv(project, rows)
+    project.log(operator, "导出操作日志", info["filename"], f"导出 {info['count']} 条")
+    return {
+        **info,
+        "download_url": f"/api/export/file/{quote(info['filename'])}",
+    }
 
 
 # ───────────────────────── 导入问题汇总 ─────────────────────────
@@ -1367,7 +1404,7 @@ def download_export(filename: str, _: str = Depends(get_operator)):
     out_resolved = (proj.root / OUT_DIR).resolve()
     p = (out_resolved / unquote(filename)).resolve()
     # 防目录穿越：必须落在输出目录内
-    if p.parent != out_resolved or p.suffix.lower() not in {".xlsx", ".zip", ".txt"}:
+    if p.parent != out_resolved or p.suffix.lower() not in {".csv", ".xlsx", ".zip", ".txt"}:
         raise HTTPException(status_code=400, detail="非法文件名")
     if not p.is_file():
         raise HTTPException(status_code=404, detail="文件不存在（可能已被移动）")
@@ -1458,6 +1495,7 @@ def open_folder(req: FolderReq, _: str = Depends(get_operator)):
 app.include_router(build_operations_router(
     get_operator,
     list_logs,
+    export_audit_logs,
     import_template,
     import_excel,
     import_merge,
