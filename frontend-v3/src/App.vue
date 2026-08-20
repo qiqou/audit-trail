@@ -3,9 +3,11 @@ import { FolderOpened, SwitchButton } from "@element-plus/icons-vue";
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { useRouter } from "vue-router";
+import { storeToRefs } from "pinia";
 
 import { api, type HealthResult, type ProjectInfo, type Unit } from "./api/client";
 import { useRuntimeStore } from "./app/runtimeStore";
+import { useSessionStore } from "./app/sessionStore";
 import { APP_VERSION_LABEL } from "./version";
 
 // 项目列表/登录页不需要工作区和低频操作面板，打开项目时才加载，缩短首次启动等待。
@@ -13,6 +15,8 @@ const IssueWorkspace = defineAsyncComponent(() => import("./components/IssueWork
 const ProjectOperations = defineAsyncComponent(() => import("./components/ProjectOperations.vue"));
 const router = useRouter();
 const runtimeStore = useRuntimeStore();
+const sessionStore = useSessionStore();
+const { operator } = storeToRefs(sessionStore);
 
 type RecentProject = { path: string; name: string; time: number };
 type AutoSaveMode = "realtime" | "5m" | "20m";
@@ -49,7 +53,6 @@ async function refreshRecent(): Promise<void> {
   }
 }
 
-const operator = ref(sessionStorage.getItem("audit_operator") ?? "");
 const loginName = ref(operator.value);
 const project = ref<ProjectInfo | null>(null);
 const units = ref<Unit[]>([]);
@@ -222,7 +225,7 @@ async function login(): Promise<void> {
   }
   busy.value = true;
   try {
-    operator.value = (await api.login(loginName.value.trim())).operator;
+    sessionStore.setOperator((await api.login(loginName.value.trim())).operator);
     await refreshRecent();
     ElMessage.success(`欢迎，${operator.value}`);
   } catch (error) {
@@ -459,7 +462,7 @@ function autoSaveModeChanged(mode: AutoSaveMode): void {
 function resetSession(showExpiredMessage = false): void {
   const previousOperator = operator.value;
   api.clearSession();
-  operator.value = "";
+  sessionStore.clearOperator();
   if (previousOperator) loginName.value = previousOperator;
   project.value = null;
   units.value = [];
@@ -488,7 +491,7 @@ async function validateStoredSession(): Promise<void> {
   if (!operator.value) return;
   try {
     const session = await api.currentSession();
-    operator.value = session.operator;
+    sessionStore.setOperator(session.operator);
     // 项目租约被其他窗口接管（体验优化：强制切换）：提示并回到项目列表。
     // 旧窗口的项目连接已被后端吊销，未保存内容无法再落盘，故跳过未保存确认。
     if (session.project_preempted) {
