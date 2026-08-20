@@ -46,6 +46,7 @@ from domain.review_workflow import (
     validate_review_event,
 )
 from repositories.evidence import EvidenceRepository
+from repositories.exchanges import ExchangeRepository
 from repositories.issues import IssueRepository
 from repositories.units import UnitRepository
 from rich_text import rich_html_to_plain_text, sanitize_rich_html
@@ -249,6 +250,7 @@ class AuditProject:
         self._units = UnitRepository(self._conn)
         self._issues = IssueRepository(self._conn)
         self._evidence = EvidenceRepository(self._conn)
+        self._exchanges = ExchangeRepository(self._conn)
         self._conn.execute("PRAGMA foreign_keys = ON")
         # 合并/导入换库交换窗口标记（I2）：交换期间读请求短暂等待而非命中已关闭连接
         self._swapping = False
@@ -1109,6 +1111,7 @@ class AuditProject:
         self._units = UnitRepository(self._conn)
         self._issues = IssueRepository(self._conn)
         self._evidence = EvidenceRepository(self._conn)
+        self._exchanges = ExchangeRepository(self._conn)
 
     def close(self):
         self._conn.close()
@@ -2845,9 +2848,7 @@ class AuditProject:
         return {field: issue.get(field) for field in ISSUE_FIELDS}
 
     def _exchange_session_row(self, session_uuid: str):
-        return self._conn.execute(
-            "SELECT * FROM exchange_sessions WHERE session_uuid=?", (session_uuid,)
-        ).fetchone()
+        return self._exchanges.get_session(session_uuid)
 
     def _require_open_exchange(self, session_uuid: str):
         row = self._exchange_session_row(session_uuid)
@@ -2868,13 +2869,9 @@ class AuditProject:
         issue = self.get_issue(issue_id)
         if not issue:
             raise KeyError("底稿不存在")
-        existing = self._conn.execute(
-            "SELECT session_uuid FROM exchange_sessions WHERE issue_uuid=? AND status='open' "
-            "ORDER BY opened_at DESC LIMIT 1",
-            (str(issue.get("issue_uuid") or ""),),
-        ).fetchone()
-        if existing:
-            return self.get_exchange_session(str(existing["session_uuid"]))
+        existing_uuid = self._exchanges.find_open_session_for_issue_uuid(str(issue.get("issue_uuid") or ""))
+        if existing_uuid:
+            return self.get_exchange_session(existing_uuid)
         version = self._conn.execute(
             "SELECT id FROM issue_versions WHERE issue_id=? ORDER BY version_no DESC LIMIT 1", (issue_id,)
         ).fetchone()
