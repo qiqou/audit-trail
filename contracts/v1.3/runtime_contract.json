@@ -1,0 +1,1769 @@
+{
+  "audit_log": {
+    "columns": [
+      "id",
+      "event_uuid",
+      "project_uuid",
+      "issue_uuid",
+      "file_uuid",
+      "actor_account",
+      "actor_uid",
+      "device_id",
+      "operator",
+      "action",
+      "target",
+      "detail",
+      "created_at",
+      "prev_hash",
+      "event_hash"
+    ],
+    "observed_actions": [
+      "关联附件",
+      "导入附件",
+      "开始问题交流",
+      "新增交流批注",
+      "新建单位",
+      "新建底稿"
+    ]
+  },
+  "export": {
+    "import_headers": [
+      "被审计单位*",
+      "所属版块*",
+      "问题分类",
+      "缺陷定性*",
+      "缺陷描述",
+      "问题金额",
+      "制度依据",
+      "审计建议",
+      "编写人",
+      "审核人"
+    ],
+    "summary_headers": [
+      {
+        "field": "seq",
+        "label": "序号"
+      },
+      {
+        "field": "unit_name",
+        "label": "被审计单位"
+      },
+      {
+        "field": "department",
+        "label": "所属版块"
+      },
+      {
+        "field": "category",
+        "label": "问题分类"
+      },
+      {
+        "field": "defect_type",
+        "label": "缺陷定性"
+      },
+      {
+        "field": "defect_desc",
+        "label": "缺陷描述"
+      },
+      {
+        "field": "amount",
+        "label": "问题金额"
+      },
+      {
+        "field": "regulation_basis",
+        "label": "制度依据"
+      },
+      {
+        "field": "suggestion",
+        "label": "审计建议"
+      },
+      {
+        "field": "author",
+        "label": "编写人"
+      },
+      {
+        "field": "reviewer",
+        "label": "审核人"
+      },
+      {
+        "field": "status",
+        "label": "状态"
+      },
+      {
+        "field": "version_no",
+        "label": "版本数"
+      },
+      {
+        "field": "file_count",
+        "label": "附件数"
+      },
+      {
+        "field": "evidence",
+        "label": "证据提示"
+      }
+    ]
+  },
+  "format": "audit-trail-contract-snapshot/v1",
+  "indexes": [
+    {
+      "name": "idx_exchange_comments_session",
+      "sql": "CREATE INDEX idx_exchange_comments_session ON exchange_comments(session_uuid, created_at)",
+      "table": "exchange_comments"
+    },
+    {
+      "name": "idx_exchange_requests_session",
+      "sql": "CREATE INDEX idx_exchange_requests_session ON exchange_requests(session_uuid, created_at)",
+      "table": "exchange_requests"
+    },
+    {
+      "name": "idx_exchange_revisions_session",
+      "sql": "CREATE INDEX idx_exchange_revisions_session ON exchange_revisions(session_uuid, proposed_at)",
+      "table": "exchange_revisions"
+    },
+    {
+      "name": "idx_exchange_revisions_version",
+      "sql": "CREATE INDEX idx_exchange_revisions_version ON exchange_revisions(version_id)",
+      "table": "exchange_revisions"
+    },
+    {
+      "name": "idx_exchange_sessions_issue",
+      "sql": "CREATE INDEX idx_exchange_sessions_issue ON exchange_sessions(issue_uuid, opened_at DESC)",
+      "table": "exchange_sessions"
+    },
+    {
+      "name": "idx_files_active_sha",
+      "sql": "CREATE INDEX idx_files_active_sha ON files(sha256, deleted_at, id)",
+      "table": "files"
+    },
+    {
+      "name": "idx_files_active_unit",
+      "sql": "CREATE INDEX idx_files_active_unit ON files(unit_id, deleted_at, orig_name)",
+      "table": "files"
+    },
+    {
+      "name": "idx_files_unit",
+      "sql": "CREATE INDEX idx_files_unit ON files(unit_id)",
+      "table": "files"
+    },
+    {
+      "name": "idx_files_uuid",
+      "sql": "CREATE UNIQUE INDEX idx_files_uuid ON files(file_uuid)",
+      "table": "files"
+    },
+    {
+      "name": "idx_issue_files_file",
+      "sql": "CREATE INDEX idx_issue_files_file ON issue_files(file_id)",
+      "table": "issue_files"
+    },
+    {
+      "name": "idx_issues_active_unit",
+      "sql": "CREATE INDEX idx_issues_active_unit ON issues(unit_id, deleted_at, seq)",
+      "table": "issues"
+    },
+    {
+      "name": "idx_issues_unit",
+      "sql": "CREATE INDEX idx_issues_unit ON issues(unit_id)",
+      "table": "issues"
+    },
+    {
+      "name": "idx_issues_uuid",
+      "sql": "CREATE UNIQUE INDEX idx_issues_uuid ON issues(issue_uuid)",
+      "table": "issues"
+    },
+    {
+      "name": "idx_jobs_status_created",
+      "sql": "CREATE INDEX idx_jobs_status_created ON jobs(status, created_at)",
+      "table": "jobs"
+    },
+    {
+      "name": "idx_log_created",
+      "sql": "CREATE INDEX idx_log_created ON audit_log(created_at)",
+      "table": "audit_log"
+    },
+    {
+      "name": "idx_log_operator",
+      "sql": "CREATE INDEX idx_log_operator ON audit_log(operator)",
+      "table": "audit_log"
+    },
+    {
+      "name": "idx_logs_event_uuid",
+      "sql": "CREATE UNIQUE INDEX idx_logs_event_uuid ON audit_log(event_uuid)",
+      "table": "audit_log"
+    },
+    {
+      "name": "idx_logs_project_created",
+      "sql": "CREATE INDEX idx_logs_project_created ON audit_log(project_uuid, created_at)",
+      "table": "audit_log"
+    },
+    {
+      "name": "idx_merge_conflicts_status",
+      "sql": "CREATE INDEX idx_merge_conflicts_status ON merge_conflicts(status, created_at)",
+      "table": "merge_conflicts"
+    },
+    {
+      "name": "idx_project_requests_status_due",
+      "sql": "CREATE INDEX idx_project_requests_status_due ON project_requests(status, due_date, created_at)",
+      "table": "project_requests"
+    },
+    {
+      "name": "idx_project_requests_unit",
+      "sql": "CREATE INDEX idx_project_requests_unit ON project_requests(unit_id, issue_id)",
+      "table": "project_requests"
+    },
+    {
+      "name": "idx_recycle_active",
+      "sql": "CREATE INDEX idx_recycle_active ON recycle_bin(entity_type, purged_at, restored_at, deleted_at)",
+      "table": "recycle_bin"
+    },
+    {
+      "name": "idx_recycle_uuid",
+      "sql": "CREATE UNIQUE INDEX idx_recycle_uuid ON recycle_bin(recycle_uuid)",
+      "table": "recycle_bin"
+    },
+    {
+      "name": "idx_units_active",
+      "sql": "CREATE INDEX idx_units_active ON units(deleted_at, sort_order, id)",
+      "table": "units"
+    },
+    {
+      "name": "idx_units_uuid",
+      "sql": "CREATE UNIQUE INDEX idx_units_uuid ON units(unit_uuid)",
+      "table": "units"
+    },
+    {
+      "name": "idx_versions_issue",
+      "sql": "CREATE INDEX idx_versions_issue ON issue_versions(issue_id)",
+      "table": "issue_versions"
+    },
+    {
+      "name": "idx_workpaper_templates_updated",
+      "sql": "CREATE INDEX idx_workpaper_templates_updated ON workpaper_templates(updated_at DESC, id DESC)",
+      "table": "workpaper_templates"
+    },
+    {
+      "name": "uq_issues_active_unit_seq",
+      "sql": "CREATE UNIQUE INDEX uq_issues_active_unit_seq ON issues(unit_id, seq) WHERE deleted_at IS NULL",
+      "table": "issues"
+    }
+  ],
+  "project_tree": [
+    "audit.db",
+    "快照",
+    "输出",
+    "附件库"
+  ],
+  "schema_version": 17,
+  "tables": {
+    "audit_log": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "event_uuid",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "project_uuid",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "issue_uuid",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "file_uuid",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "actor_account",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "actor_uid",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "device_id",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "operator",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "action",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "target",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "detail",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "datetime('now','localtime')",
+          "name": "created_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "prev_hash",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "event_hash",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": []
+    },
+    "backup_settings": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": "0",
+          "name": "enabled",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": "''",
+          "name": "target_dir",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "360",
+          "name": "interval_minutes",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": "7",
+          "name": "retention_days",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": "107374182400",
+          "name": "max_bytes",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": "''",
+          "name": "last_success_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "last_error_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "last_error",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": []
+    },
+    "exchange_comments": {
+      "columns": [
+        {
+          "default": null,
+          "name": "comment_uuid",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "session_uuid",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "revision_uuid",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "anchor_field",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "body",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_by",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "revision_uuid",
+          "on_delete": "SET NULL",
+          "on_update": "NO ACTION",
+          "table": "exchange_revisions",
+          "to": "revision_uuid"
+        },
+        {
+          "from": "session_uuid",
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "table": "exchange_sessions",
+          "to": "session_uuid"
+        }
+      ]
+    },
+    "exchange_requests": {
+      "columns": [
+        {
+          "default": null,
+          "name": "request_uuid",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "session_uuid",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "content",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "'open'",
+          "name": "status",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "provided_file_id",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": "''",
+          "name": "note",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_by",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "updated_by",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "provided_file_id",
+          "on_delete": "SET NULL",
+          "on_update": "NO ACTION",
+          "table": "files",
+          "to": "id"
+        },
+        {
+          "from": "session_uuid",
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "table": "exchange_sessions",
+          "to": "session_uuid"
+        }
+      ]
+    },
+    "exchange_revisions": {
+      "columns": [
+        {
+          "default": null,
+          "name": "revision_uuid",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "session_uuid",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "version_id",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "field_name",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "old_value",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "new_value",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "reason",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "'proposed'",
+          "name": "status",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "proposed_by",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "proposed_at",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "decided_by",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "decided_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "applied_by",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "applied_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "version_id",
+          "on_delete": "SET NULL",
+          "on_update": "NO ACTION",
+          "table": "issue_versions",
+          "to": "id"
+        },
+        {
+          "from": "session_uuid",
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "table": "exchange_sessions",
+          "to": "session_uuid"
+        }
+      ]
+    },
+    "exchange_sessions": {
+      "columns": [
+        {
+          "default": null,
+          "name": "session_uuid",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "issue_id",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "issue_uuid",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "base_version_id",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "base_snapshot",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "'open'",
+          "name": "status",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "opened_by",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "opened_at",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "closed_by",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "closed_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "close_note",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "base_version_id",
+          "on_delete": "SET NULL",
+          "on_update": "NO ACTION",
+          "table": "issue_versions",
+          "to": "id"
+        },
+        {
+          "from": "issue_id",
+          "on_delete": "SET NULL",
+          "on_update": "NO ACTION",
+          "table": "issues",
+          "to": "id"
+        }
+      ]
+    },
+    "files": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "file_uuid",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "unit_id",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "stored_name",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "orig_name",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "folder_path",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "rel_path",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "0",
+          "name": "size",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": "''",
+          "name": "sha256",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "mime",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "exclusive_to",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "deleted_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "deleted_by",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "exclusive_to",
+          "on_delete": "SET NULL",
+          "on_update": "NO ACTION",
+          "table": "issues",
+          "to": "id"
+        },
+        {
+          "from": "unit_id",
+          "on_delete": "RESTRICT",
+          "on_update": "NO ACTION",
+          "table": "units",
+          "to": "id"
+        }
+      ]
+    },
+    "issue_files": {
+      "columns": [
+        {
+          "default": null,
+          "name": "issue_id",
+          "not_null": true,
+          "primary_key_order": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "file_id",
+          "not_null": true,
+          "primary_key_order": 2,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "linked_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "file_id",
+          "on_delete": "RESTRICT",
+          "on_update": "NO ACTION",
+          "table": "files",
+          "to": "id"
+        },
+        {
+          "from": "issue_id",
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "table": "issues",
+          "to": "id"
+        }
+      ]
+    },
+    "issue_versions": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "issue_id",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "version_no",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "snapshot",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "saved_by",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "issue_id",
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "table": "issues",
+          "to": "id"
+        }
+      ]
+    },
+    "issues": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "issue_uuid",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "unit_id",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "seq",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": "''",
+          "name": "issue_code",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "0",
+          "name": "sort_order",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": "''",
+          "name": "department",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "category",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "defect_type",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "defect_desc",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "defect_desc_rich",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "amount",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "amount_minor",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": "''",
+          "name": "currency",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "amount_unit",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "regulation_basis",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "regulation_basis_rich",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "suggestion",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "suggestion_rich",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "author",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "reviewer",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "'草稿'",
+          "name": "status",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "deleted_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "deleted_by",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "unit_id",
+          "on_delete": "RESTRICT",
+          "on_update": "NO ACTION",
+          "table": "units",
+          "to": "id"
+        }
+      ]
+    },
+    "jobs": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "type",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "'{}'",
+          "name": "payload",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "'{}'",
+          "name": "progress",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "'{}'",
+          "name": "result",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "error",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "0",
+          "name": "cancel_requested",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "started_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "finished_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": []
+    },
+    "merge_batches": {
+      "columns": [
+        {
+          "default": null,
+          "name": "batch_uuid",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "operator",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "source_count",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": []
+    },
+    "merge_conflicts": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "batch_uuid",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "source_name",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "conflict_type",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "message",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "resolution",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "'open'",
+          "name": "status",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "resolved_by",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "resolved_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "batch_uuid",
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "table": "merge_batches",
+          "to": "batch_uuid"
+        }
+      ]
+    },
+    "meta": {
+      "columns": [
+        {
+          "default": null,
+          "name": "key",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "value",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": []
+    },
+    "project_requests": {
+      "columns": [
+        {
+          "default": null,
+          "name": "request_uuid",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "unit_id",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "issue_id",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "title",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "detail",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "responsible",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "due_date",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "'open'",
+          "name": "status",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "provided_file_id",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": "''",
+          "name": "note",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_by",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "updated_by",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "from": "provided_file_id",
+          "on_delete": "SET NULL",
+          "on_update": "NO ACTION",
+          "table": "files",
+          "to": "id"
+        },
+        {
+          "from": "issue_id",
+          "on_delete": "SET NULL",
+          "on_update": "NO ACTION",
+          "table": "issues",
+          "to": "id"
+        },
+        {
+          "from": "unit_id",
+          "on_delete": "SET NULL",
+          "on_update": "NO ACTION",
+          "table": "units",
+          "to": "id"
+        }
+      ]
+    },
+    "recycle_bin": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "recycle_uuid",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "entity_type",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "entity_id",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "entity_uuid",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "deleted_by",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "deleted_at",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "restored_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "purged_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": []
+    },
+    "schema_migrations": {
+      "columns": [
+        {
+          "default": null,
+          "name": "version",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "applied_at",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "backup_rel_path",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": []
+    },
+    "units": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "unit_uuid",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "0",
+          "name": "sort_order",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "deleted_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "''",
+          "name": "deleted_by",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "datetime('now','localtime')",
+          "name": "created_at",
+          "not_null": false,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": []
+    },
+    "workpaper_templates": {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "not_null": false,
+          "primary_key_order": 1,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "template_uuid",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "snapshot",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_by",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_by",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "not_null": true,
+          "primary_key_order": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": []
+    }
+  }
+}
