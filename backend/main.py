@@ -67,6 +67,7 @@ from platform_adapter import (
 from routers.exchanges import build_router as build_exchanges_router
 from routers.issues import build_router as build_issues_router
 from routers.project_runtime import build_router as build_project_runtime_router
+from routers.projects import build_router as build_projects_router
 from routers.recycle import build_router as build_recycle_router
 from routers.settings import build_router as build_settings_router
 from routers.units import build_router as build_units_router
@@ -360,7 +361,6 @@ def _release_project_lease(ctx: SessionContext, key: str = "") -> None:
 
 # ───────────────────────── 项目 ─────────────────────────
 
-@app.post("/api/project/open")
 def open_project(req: OpenReq, operator: str = Depends(get_operator)):
     raw_path = req.path.strip()
     if not raw_path:
@@ -404,7 +404,6 @@ def open_project(req: OpenReq, operator: str = Depends(get_operator)):
     return _project_info()
 
 
-@app.post("/api/project/create")
 def create_project(req: CreateReq, operator: str = Depends(get_operator)):
     raw_path = req.path.strip()
     if not raw_path:
@@ -461,7 +460,6 @@ def create_project(req: CreateReq, operator: str = Depends(get_operator)):
     return _project_info()
 
 
-@app.post("/api/project/delete")
 def delete_project(req: OpenReq, operator: str = Depends(get_operator)):
     """删除项目目录（仅限 .auditproj 伪装项目，防误删其他文件夹）。
 
@@ -499,7 +497,6 @@ def delete_project(req: OpenReq, operator: str = Depends(get_operator)):
     return {"deleted": str(p)}
 
 
-@app.post("/api/project/reset")
 def reset_project(req: ResetReq, operator: str = Depends(get_operator)):
     """重置项目：清空全部业务数据并完全初始化。
 
@@ -514,12 +511,10 @@ def reset_project(req: ResetReq, operator: str = Depends(get_operator)):
     return {"ok": True}
 
 
-@app.get("/api/project/current")
 def current_project(_: str = Depends(get_operator)):
     return _project_info()
 
 
-@app.post("/api/project/rename")
 def rename_project(req: NameReq, operator: str = Depends(get_operator)):
     proj = get_project()
     old = proj.project_name
@@ -532,13 +527,11 @@ def rename_project(req: NameReq, operator: str = Depends(get_operator)):
     return _project_info()
 
 
-@app.get("/api/recent")
 def recent_projects(operator: str = Depends(get_operator)):
     """最近项目列表（按使用人隔离，存本机 ~/.shenji，与端口/浏览器无关）。"""
     return {"items": load_recent_all().get(operator, [])}
 
 
-@app.delete("/api/recent")
 def forget_recent_project(path: str, operator: str = Depends(get_operator)):
     """从最近列表移除一条记录（不移除磁盘项目）。"""
     forget_recent(operator, path)
@@ -580,6 +573,12 @@ app.include_router(build_exchanges_router(get_project, get_operator))
 app.include_router(build_recycle_router(get_project, get_operator, _require_project_idle))
 app.include_router(build_project_runtime_router(
     get_project, get_operator, get_current_context, job_runner.submit, job_runner.cancel,
+))
+app.include_router(build_projects_router(
+    get_project, get_operator, lambda path: AuditProject(path), get_current_context, _project_key,
+    _require_current_project_idle_before_switch, _reserve_project, _release_project_lease,
+    _close_current_project, _bind_project_identity, _project_info, _require_project_idle,
+    _session_registry.active_owner, PROJECT_LEASE_SECONDS,
 ))
 
 
