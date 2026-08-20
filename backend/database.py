@@ -47,6 +47,7 @@ from domain.review_workflow import (
 )
 from repositories.units import UnitRepository
 from repositories.issues import IssueRepository
+from repositories.evidence import EvidenceRepository
 from rich_text import rich_html_to_plain_text, sanitize_rich_html
 
 DB_FILE = "audit.db"
@@ -247,6 +248,7 @@ class AuditProject:
         self._conn.row_factory = sqlite3.Row
         self._units = UnitRepository(self._conn)
         self._issues = IssueRepository(self._conn)
+        self._evidence = EvidenceRepository(self._conn)
         self._conn.execute("PRAGMA foreign_keys = ON")
         # 合并/导入换库交换窗口标记（I2）：交换期间读请求短暂等待而非命中已关闭连接
         self._swapping = False
@@ -1106,6 +1108,7 @@ class AuditProject:
         self._conn.execute("PRAGMA busy_timeout = 5000")
         self._units = UnitRepository(self._conn)
         self._issues = IssueRepository(self._conn)
+        self._evidence = EvidenceRepository(self._conn)
 
     def close(self):
         self._conn.close()
@@ -3332,50 +3335,22 @@ class AuditProject:
 
     def find_folder_by_fingerprint(self, sha256: str) -> dict | None:
         """文件夹查重：按内容指纹（相对路径+文件内容哈希）找已存在文件夹实体。"""
-        if not sha256:
-            return None
-        row = self._conn.execute(
-            "SELECT f.*, u.name AS unit_name FROM files f "
-            "JOIN units u ON u.id = f.unit_id WHERE f.mime='folder' AND f.sha256=? "
-            "AND f.deleted_at IS NULL AND u.deleted_at IS NULL "
-            "ORDER BY f.id LIMIT 1",
-            (sha256,),
-        ).fetchone()
-        return dict(row) if row else None
+        return self._evidence.find_folder_by_fingerprint(sha256)
 
     def get_file(self, file_id: int, *, include_deleted: bool = False):
-        sql = "SELECT * FROM files WHERE id=?"
-        if not include_deleted:
-            sql += " AND deleted_at IS NULL"
-        r = self._conn.execute(sql, (file_id,)).fetchone()
-        return dict(r) if r else None
+        return self._evidence.get(file_id, include_deleted=include_deleted)
 
     def find_file_by_sha(self, sha256: str) -> dict | None:
         """项目级查重：按内容指纹找已存在文件（同一实体只存一份）。"""
-        if not sha256:
-            return None
-        row = self._conn.execute(
-            "SELECT f.*, u.name AS unit_name FROM files f "
-            "JOIN units u ON u.id = f.unit_id WHERE f.sha256=? AND f.deleted_at IS NULL "
-            "AND u.deleted_at IS NULL ORDER BY f.id LIMIT 1",
-            (sha256,),
-        ).fetchone()
-        return dict(row) if row else None
+        return self._evidence.find_file_by_sha(sha256)
 
     def list_files(self, unit_id: int) -> list[dict]:
-        rows = self._conn.execute(
-            "SELECT * FROM files WHERE unit_id=? AND deleted_at IS NULL ORDER BY orig_name", (unit_id,)
-        ).fetchall()
-        return [dict(r) for r in rows]
+        return self._evidence.list_active_for_unit(unit_id)
 
     def unlinked_files(self, unit_id: int) -> list[dict]:
         """资料库：该单位所有非独占文件（无论是否已关联其他底稿），
         共享模式下其他底稿可继续关联使用。前端自行过滤已关联当前问题的。"""
-        rows = self._conn.execute(
-            "SELECT * FROM files WHERE unit_id=? AND deleted_at IS NULL AND exclusive_to IS NULL ORDER BY orig_name",
-            (unit_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        return self._evidence.list_shareable_for_unit(unit_id)
 
     def add_file(self, unit_id: int, src_path, operator: str, orig_name: str = None,
                  folder_path: str = "", verified_sha256: str = "", verified_size: int | None = None) -> dict:
