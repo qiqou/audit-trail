@@ -54,7 +54,7 @@ function loadRecentLocal(): RecentProject[] {
 
 async function refreshRecent(): Promise<void> {
   try {
-    const items = (await api.recent()).items;
+    const items = (await api.projects.recent()).items;
     recentProjects.value = items
       .filter((item): item is RecentProject => Boolean(item?.path && item?.name))
       .slice(0, 20);
@@ -158,7 +158,7 @@ const { refreshUnits, refreshDepartments, refreshCategories, refreshIssueNumber,
 
 async function forgetRecent(path: string): Promise<void> {
   try {
-    await api.forgetRecent(path);
+    await api.projects.forgetRecent(path);
     recentProjects.value = recentProjects.value.filter((project) => project.path !== path);
   } catch (error) {
     report(error);
@@ -176,7 +176,7 @@ async function deleteProject(recent: RecentProject): Promise<void> {
     return; // 用户取消
   }
   try {
-    await api.deleteProject(recent.path);
+    await api.projects.deleteProject(recent.path);
     await refreshRecent(); // 后端删除项目时已自动移除最近记录
     if (project.value?.path === recent.path) {
       backToProjectList(true); // 项目已删除，强制返回项目列表（跳过未保存确认）
@@ -211,7 +211,7 @@ async function login(): Promise<void> {
 
 async function chooseProjectFolder(): Promise<void> {
   try {
-    const result = await api.chooseFolder();
+    const result = await api.projects.chooseFolder();
     if (result.path) projectPath.value = result.path;
     if (result.warning) ElMessage.warning(result.warning);
   } catch (error) {
@@ -228,7 +228,7 @@ const restoring = ref(false);
 
 async function chooseRestoreTarget(): Promise<void> {
   try {
-    const result = await api.chooseFolder();
+    const result = await api.projects.chooseFolder();
     if (result.path) restoreTarget.value = result.path;
     if (result.warning) ElMessage.warning(result.warning);
   } catch (error) {
@@ -291,8 +291,8 @@ async function setProject(action: "open" | "create"): Promise<void> {
   creating.value = action === "create";
   try {
     project.value = action === "open"
-      ? await api.openProject(projectPath.value.trim())
-      : await api.createProject(projectPath.value.trim(), projectName.value.trim());
+      ? await api.projects.openProject(projectPath.value.trim())
+      : await api.projects.createProject(projectPath.value.trim(), projectName.value.trim());
     jobStore.clear();
     await refreshProjectReferenceData();
     await refreshRecent(); // 后端打开/创建时已自动记录
@@ -309,7 +309,7 @@ async function setProject(action: "open" | "create"): Promise<void> {
 async function openRecent(recent: RecentProject): Promise<void> {
   opening.value = true;
   try {
-    project.value = await api.openProject(recent.path);
+    project.value = await api.projects.openProject(recent.path);
     jobStore.clear();
     await refreshProjectReferenceData();
     await refreshRecent(); // 后端打开时已自动更新记录时间
@@ -337,7 +337,7 @@ function issueNumberChanged(rule: { prefix: string; suffix: string }): void {
 async function runHealthCheck(): Promise<void> {
   busy.value = true;
   try {
-    health.value = await api.health();
+    health.value = await api.projects.health();
     healthDialogVisible.value = true;
     ElMessage.success(health.value.ok ? "项目健康检查通过" : `发现 ${health.value.problems.length} 项待处理问题`);
   } catch (error) {
@@ -351,7 +351,7 @@ async function openRestoredProject(path: string): Promise<boolean> {
   // 恢复已产生新项目，但切换打开前仍须保护当前编辑中的底稿。
   if (workspace.value && !(await workspace.value.confirmCurrentLeave())) return false;
   try {
-    project.value = await api.openProject(path);
+    project.value = await api.projects.openProject(path);
     jobStore.clear();
     await refreshProjectReferenceData();
     await refreshRecent(); // 后端打开时已自动记录

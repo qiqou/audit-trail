@@ -1,4 +1,5 @@
 import { HttpClient } from "../shared/api/http";
+import { createProjectApi, type ApiRequest } from "./domains/projects";
 
 export interface ProjectInfo {
   path: string;
@@ -470,6 +471,10 @@ export type IssuePatch = Partial<IssueChanges>;
 class ApiClient {
   private readonly http = new HttpClient();
 
+  private readonly projectRequest: ApiRequest = (path, init) => this.request(path, init);
+
+  readonly projects = createProjectApi(this.projectRequest);
+
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     return this.http.request(path, init);
   }
@@ -504,31 +509,31 @@ class ApiClient {
   }
 
   chooseFolder(): Promise<{ path: string; warning?: string }> {
-    return this.request("/api/system/choose-folder", { method: "POST" });
+    return this.projects.chooseFolder();
   }
 
   openProject(path: string): Promise<ProjectInfo> {
-    return this.request("/api/project/open", { method: "POST", body: JSON.stringify({ path }) });
+    return this.projects.openProject(path);
   }
 
   createProject(path: string, name: string): Promise<ProjectInfo> {
-    return this.request("/api/project/create", { method: "POST", body: JSON.stringify({ path, name }) });
+    return this.projects.createProject(path, name);
   }
 
   deleteProject(path: string): Promise<{ deleted: string }> {
-    return this.request("/api/project/delete", { method: "POST", body: JSON.stringify({ path }) });
+    return this.projects.deleteProject(path);
   }
 
   renameProject(name: string): Promise<ProjectInfo> {
-    return this.request("/api/project/rename", { method: "POST", body: JSON.stringify({ name }) });
+    return this.projects.renameProject(name);
   }
 
   recent(): Promise<{ items: RecentProjectItem[] }> {
-    return this.request("/api/recent");
+    return this.projects.recent();
   }
 
   forgetRecent(path: string): Promise<{ ok: boolean }> {
-    return this.request(`/api/recent?path=${encodeURIComponent(path)}`, { method: "DELETE" });
+    return this.projects.forgetRecent(path);
   }
 
   units(): Promise<Unit[]> {
@@ -552,11 +557,11 @@ class ApiClient {
   }
 
   health(): Promise<HealthResult> {
-    return this.request("/api/project/health?sample_size=20");
+    return this.projects.health();
   }
 
   summary(): Promise<ProjectSummary> {
-    return this.request("/api/project/summary");
+    return this.projects.summary();
   }
 
   batchIssueMetadataPreflight(issueIds: number[], changes: BatchIssueMetadataChanges): Promise<BatchIssueMetadataPreflight> {
