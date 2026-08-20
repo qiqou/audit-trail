@@ -7,7 +7,6 @@
 """
 
 import hashlib
-import io
 import json
 import logging
 import os
@@ -23,8 +22,7 @@ from config import PROJECT_EXT
 from database import ATTACH_DIR, OUT_DIR, SYSTEM_METADATA_NAMES, AuditProject, _now, _safe
 from infra.exporters.confirmation_docx import write_confirmation_docx
 from infra.exporters.operational import write_audit_log_csv, write_diagnostics_support_package
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from infra.exporters.summary_excel import SUMMARY_HEADERS, build_summary_workbook, summary_excel_bytes
 from platform_adapter import harden_project
 
 logger = logging.getLogger(__name__)
@@ -96,36 +94,6 @@ def _validate_archive_size(zf: zipfile.ZipFile, label: str) -> list[zipfile.ZipI
         raise ValueError(f"{label}解压总量超过上限 {human_size(MAX_EXTRACT_TOTAL)}，拒绝处理")
     return infos
 
-# 汇总表列定义：字段名 → (表头, 列宽)
-SUMMARY_HEADERS = [
-    ("seq",             "序号",       6),
-    ("unit_name",       "被审计单位", 16),
-    ("department",      "所属版块",   14),
-    ("category",        "问题分类",   14),
-    ("defect_type",     "缺陷定性",   14),
-    ("defect_desc",     "缺陷描述",   42),
-    ("amount",          "问题金额",   10),
-    ("regulation_basis","制度依据",   30),
-    ("suggestion",      "审计建议",   30),
-    ("author",          "编写人",     10),
-    ("reviewer",        "审核人",     10),
-    ("status",          "状态",       8),
-    ("version_no",      "版本数",     8),
-    ("file_count",      "附件数",     8),
-    ("evidence",        "证据提示",   14),
-]
-
-HF = Font(name="微软雅黑", size=10, bold=True, color="FFFFFF")
-HFILL = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-HA = Alignment(horizontal="center", vertical="center", wrap_text=True)
-THIN = Border(left=Side(style="thin"), right=Side(style="thin"),
-              top=Side(style="thin"), bottom=Side(style="thin"))
-DF = Font(name="微软雅黑", size=10)
-DA = Alignment(vertical="center", wrap_text=True)
-AF = PatternFill(start_color="F2F7FB", end_color="F2F7FB", fill_type="solid")
-TITLE_F = Font(name="微软雅黑", size=12, bold=True)
-
-
 def _now_ts() -> str:
     """时间戳到毫秒，配合 _unique_path 保证输出文件名不重复（审查 F-04 修复）。"""
     return datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
@@ -149,11 +117,6 @@ def _unique_path(out_dir: Path, base_name: str) -> Path:
     raise RuntimeError(f"无法生成唯一文件名：{base_name}")
 
 
-
-
-def _formula_like(value) -> bool:
-    """识别可能被电子表格程序解释为公式的用户文本。"""
-    return isinstance(value, str) and value.startswith(("=", "+", "-", "@"))
 
 
 def _ensure_disk_space(target_dir: Path, needed_bytes: int) -> None:
@@ -226,53 +189,6 @@ def _collect_rows(proj: AuditProject, scope: str = "project", unit_id: int = Non
     return rows, scope_desc
 
 
-def _summary_workbook(proj: AuditProject, rows: list[dict], scope_desc: str, operator: str) -> Workbook:
-    """按既有汇总样式创建工作簿；文件输出和 ZIP 内嵌共用同一渲染结果。"""
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "审计问题汇总"
-
-    # 标题行
-    ncol = len(SUMMARY_HEADERS)
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol)
-    tc = ws.cell(row=1, column=1)
-    tc.value = f"审计项目：{proj.project_name}    {scope_desc}    导出时间：{_now()}    导出人：{operator}"
-    tc.font = TITLE_F
-    tc.alignment = Alignment(horizontal="left", vertical="center")
-    ws.row_dimensions[1].height = 28
-
-    # 表头
-    for ci, (_k, label, width) in enumerate(SUMMARY_HEADERS, 1):
-        c = ws.cell(row=2, column=ci, value=label)
-        c.font, c.fill, c.alignment, c.border = HF, HFILL, HA, THIN
-        ws.column_dimensions[chr(64 + ci)].width = width
-
-    # 数据（斑马纹）
-    for ri, row in enumerate(rows, 3):
-        for ci, (k, _label, _w) in enumerate(SUMMARY_HEADERS, 1):
-            v = row.get(k, "")
-            c = ws.cell(row=ri, column=ci, value=v)
-            if k == "amount" and isinstance(v, (int, float)):
-                # 审查 I1 修复：无币种/单位的纯数字金额写数值单元格，可合计且带千分位格式
-                c.number_format = "#,##0.00"
-            if _formula_like(v):
-                # 明确写为字符串，既阻止公式执行，也避免前导单引号污染归档回导后的原始文本。
-                c.data_type = "s"
-            c.font, c.alignment, c.border = DF, DA, THIN
-            if ri % 2 == 0:
-                c.fill = AF
-
-    ws.freeze_panes = "A3"
-    return wb
-
-
-def _summary_excel_bytes(proj: AuditProject, rows: list[dict], scope_desc: str, operator: str = "") -> bytes:
-    """生成归档内嵌的汇总表，避免先落到“输出”再复制进 ZIP。"""
-    buffer = io.BytesIO()
-    _summary_workbook(proj, rows, scope_desc, operator).save(buffer)
-    return buffer.getvalue()
-
-
 def export_excel(proj: AuditProject, scope: str = "project", operator: str = "",
                    unit_id: int = None, unit_ids: list[int] = None) -> dict:
     """生成问题汇总表 Excel 到项目 输出/。scope: unit/selected(需 unit_ids) / project。"""
@@ -290,7 +206,7 @@ def export_excel(proj: AuditProject, scope: str = "project", operator: str = "",
     filename = f"问题汇总_{_safe(proj.project_name)}_{suffix}_{_now_ts()}.xlsx"
     # 防覆盖：同秒/同名已存在时自动追加序号（审查 F-04 修复）
     out_path = _unique_path(out_dir, filename)
-    _summary_workbook(proj, rows, scope_desc, operator).save(out_path)
+    build_summary_workbook(proj.project_name, rows, scope_desc, operator, _now()).save(out_path)
     return {"filename": out_path.name, "abs_path": str(out_path), "count": len(rows)}
 
 
@@ -435,7 +351,9 @@ def _package_project_direct(proj: AuditProject, scope: str = "all", unit_ids: li
             summary_scope = "selected" if scope == "selected" else "project"
             summary_rows, summary_scope_desc = _collect_rows(proj, summary_scope, unit_ids=selected_ids or None)
             summary_path = _unique_archive_path(root, "审计问题汇总.xlsx", reserved)
-            summary_bytes = _summary_excel_bytes(proj, summary_rows, summary_scope_desc, operator)
+            summary_bytes = summary_excel_bytes(
+                proj.project_name, summary_rows, summary_scope_desc, operator, _now(),
+            )
             zf.writestr(summary_path, summary_bytes, compress_type=zipfile.ZIP_DEFLATED)
             manifest_lines.append(f"{summary_path}\t{len(summary_bytes)}\t{hashlib.sha256(summary_bytes).hexdigest()}")
 
