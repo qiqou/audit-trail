@@ -25,6 +25,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath
 from typing import ClassVar
 
+from db.migration_runner import create_snapshot, preflight_database
 from domain.errors import ConflictError
 from domain.issue_workflow import (
     ISSUE_STATUSES,
@@ -288,6 +289,10 @@ class AuditProject:
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT IN ('meta', 'sqlite_sequence') LIMIT 1"
             ).fetchone() is not None
             needs_snapshot = old_version < SCHEMA_VERSION and (old_version > 0 or has_legacy_data)
+            if needs_snapshot:
+                problems = preflight_database(self._conn)
+                if problems:
+                    raise ValueError("项目迁移预检未通过：" + "；".join(problems) + "。请从可信备份恢复后再升级。")
             backup_rel_path = self._create_migration_snapshot(old_version) if needs_snapshot else ""
 
         with self._lock, self._conn:
@@ -1085,17 +1090,7 @@ class AuditProject:
 
     def _create_migration_snapshot(self, source_version: int) -> str:
         """在迁移前创建 audit.db 的一致性快照，返回相对项目根目录的路径。"""
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        name = f"pre_migration_v{source_version}_{stamp}.db"
-        target = self.root / SNAPSHOT_DIR / name
-        temp_target = target.with_suffix(".tmp")
-        backup_conn = sqlite3.connect(temp_target)
-        try:
-            self._conn.backup(backup_conn)
-        finally:
-            backup_conn.close()
-        os.replace(temp_target, target)
-        return str(target.relative_to(self.root).as_posix())
+        return create_snapshot(self._conn, self.root, SNAPSHOT_DIR, source_version)
 
     def close(self):
         self._conn.close()
