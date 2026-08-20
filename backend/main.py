@@ -65,6 +65,7 @@ from platform_adapter import (
     choose_folder as platform_choose_folder,
 )
 from routers.evidence_links import build_router as build_evidence_links_router
+from routers.evidence_operations import build_router as build_evidence_operations_router
 from routers.exchanges import build_router as build_exchanges_router
 from routers.issues import build_router as build_issues_router
 from routers.project_runtime import build_router as build_project_runtime_router
@@ -594,14 +595,6 @@ def unlinked_files(unit_id: int, _: str = Depends(get_operator)):
     return get_project().unlinked_files(unit_id)
 
 
-@app.get(
-    "/api/units/{unit_id}/attachments/open",
-    operation_id="open_unit_attachment_directory_get",
-)
-@app.post(
-    "/api/units/{unit_id}/attachments/open",
-    operation_id="open_unit_attachment_directory_post",
-)
 def open_unit_attachment_directory(unit_id: int, operator: str = Depends(get_operator)):
     """在系统文件管理器中打开单位附件库。
 
@@ -621,14 +614,6 @@ def open_unit_attachment_directory(unit_id: int, operator: str = Depends(get_ope
     return {"ok": True}
 
 
-@app.get(
-    "/api/files/{file_id}/directory/open",
-    operation_id="open_evidence_folder_get",
-)
-@app.post(
-    "/api/files/{file_id}/directory/open",
-    operation_id="open_evidence_folder_post",
-)
 def open_evidence_folder(file_id: int, operator: str = Depends(get_operator)):
     """打开“文件夹证据”自身目录，而不是错误地下载或跳到单位根目录。"""
     proj = get_project()
@@ -650,7 +635,6 @@ def open_evidence_folder(file_id: int, operator: str = Depends(get_operator)):
     return {"ok": True}
 
 
-@app.post("/api/units/{unit_id}/folder-upload")
 async def upload_folder(unit_id: int, folder_name: str = Form(...),
                         files: list[UploadFile] = File(...),
                         operator: str = Depends(get_operator)):
@@ -720,7 +704,6 @@ async def upload_folder(unit_id: int, folder_name: str = Form(...),
     return rec
 
 
-@app.post("/api/units/{unit_id}/files")
 async def upload_file(unit_id: int, file: UploadFile = File(...), folder_path: str = Form(""),
                        operator: str = Depends(get_operator)):
     """附件上传：项目级重复检测（同内容只存一份）→ 入库 → 可关联。
@@ -772,7 +755,6 @@ async def upload_file(unit_id: int, file: UploadFile = File(...), folder_path: s
     return f
 
 
-@app.get("/api/files/{file_id}/download")
 def download_file(file_id: int, _: str = Depends(get_operator)):
     proj = get_project()
     f = proj.get_file(file_id)
@@ -787,7 +769,6 @@ def download_file(file_id: int, _: str = Depends(get_operator)):
     return FileResponse(path, filename=f["orig_name"])
 
 
-@app.post("/api/files/{file_id}/open")
 def open_file(file_id: int, operator: str = Depends(get_operator)):
     """用系统默认程序打开附件文件（macOS open / Windows 默认关联程序）。"""
     proj = get_project()
@@ -808,7 +789,6 @@ def open_file(file_id: int, operator: str = Depends(get_operator)):
     return {"ok": True}
 
 
-@app.patch("/api/files/{file_id}")
 def rename_file(file_id: int, req: NameReq, operator: str = Depends(get_operator)):
     try:
         get_project().rename_file(file_id, req.name, operator)
@@ -817,14 +797,12 @@ def rename_file(file_id: int, req: NameReq, operator: str = Depends(get_operator
     return {"ok": True}
 
 
-@app.post("/api/files/batch-rename")
 def batch_rename_files(req: BatchRenameReq, operator: str = Depends(get_operator)):
     """批量重命名附件：事务内冲突检测，冲突条目跳过并返回原因（审查 F-06 补齐）。"""
     return get_project().batch_rename_files(
         [{"id": r.id, "name": r.name} for r in req.renames], operator)
 
 
-@app.post("/api/files/{file_id}/move")
 def move_file(file_id: int, req: MoveFileReq, operator: str = Depends(get_operator)):
     """移动附件到其他单位：物理移动 + 事务更新归属（审查 F-06 补齐）。"""
     try:
@@ -833,7 +811,6 @@ def move_file(file_id: int, req: MoveFileReq, operator: str = Depends(get_operat
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.delete("/api/files/{file_id}")
 def remove_file(file_id: int, operator: str = Depends(get_operator)):
     try:
         proj = get_project()
@@ -845,6 +822,21 @@ def remove_file(file_id: int, operator: str = Depends(get_operator)):
         # 删除保护：附件仍被底稿引用
         raise HTTPException(status_code=400, detail=str(e))
     return {"ok": True}
+
+
+app.include_router(build_evidence_operations_router(
+    get_operator,
+    open_unit_attachment_directory,
+    open_evidence_folder,
+    upload_folder,
+    upload_file,
+    download_file,
+    open_file,
+    rename_file,
+    batch_rename_files,
+    move_file,
+    remove_file,
+))
 
 
 def issues_for_file(file_id: int, _: str = Depends(get_operator)):
