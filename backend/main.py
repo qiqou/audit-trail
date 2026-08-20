@@ -66,6 +66,7 @@ from platform_adapter import (
 )
 from routers.exchanges import build_router as build_exchanges_router
 from routers.issues import build_router as build_issues_router
+from routers.project_runtime import build_router as build_project_runtime_router
 from routers.recycle import build_router as build_recycle_router
 from routers.settings import build_router as build_settings_router
 from routers.units import build_router as build_units_router
@@ -544,85 +545,6 @@ def forget_recent_project(path: str, operator: str = Depends(get_operator)):
     return {"ok": True}
 
 
-@app.get("/api/project/health")
-def project_health(sample_size: int = 20, _: str = Depends(get_operator)):
-    """项目健康检查：数据完整性 + 附件物理一致性。
-
-    sample_size: 哈希抽查数量（<=0 = 全量）。检查结果含 counts 与 problems 明细。
-    """
-    proj = get_project()
-    return proj.health_check(sample_size=sample_size)
-
-
-@app.post("/api/project/scan")
-def start_scan(_: str = Depends(get_operator)):
-    """启动附件完整性扫描，任务和进度持久化到项目 SQLite。"""
-    proj = get_project()
-    job = proj.create_job("health_scan", {"sample_size": 0})
-
-    def run_scan(ctx: JobContext) -> dict:
-        def progress(done: int, total: int, phase: str) -> None:
-            ctx.progress(done, total, phase)
-            ctx.cancelled()  # 将数据库中的取消请求同步到 health_check 的安全检查点
-
-        result = proj.health_check(sample_size=0, progress=progress, cancel_event=ctx.cancel_event)
-        return result
-
-    job_runner.submit(proj, job["id"], run_scan)
-    return {"scan_id": job["id"]}
-
-
-@app.get("/api/project/scan/{scan_id}")
-def scan_status(scan_id: str, _: str = Depends(get_operator)):
-    """轮询扫描进度/结果；服务重启后仍可读取历史任务。"""
-    ctx = _ctx_var.get()
-    if ctx is None or ctx.project is None:
-        raise HTTPException(status_code=404, detail="扫描任务不存在")
-    st = ctx.project.get_job(scan_id)
-    if not st or st["type"] != "health_scan":
-        raise HTTPException(status_code=404, detail="扫描任务不存在")
-    progress = st.get("progress") or {}
-    result = st.get("result") or {}
-    return {
-        "scan_id": st["id"],
-        "status": st["status"],
-        "phase": progress.get("phase", "db"),
-        "done": progress.get("done", 0),
-        "total": progress.get("total", 0),
-        "problems": result.get("problems", []),
-        "counts": result.get("counts", {}),
-        "sample": result.get("sample", {"checked": 0, "total": 0}),
-        "error": st.get("error", ""),
-    }
-
-
-@app.post("/api/project/scan/{scan_id}/cancel")
-def cancel_scan(scan_id: str, _: str = Depends(get_operator)):
-    """请求取消扫描；运行中的任务将在下一个安全检查点停止。"""
-    st = job_runner.cancel(get_project(), scan_id)
-    if not st or st["type"] != "health_scan":
-        raise HTTPException(status_code=404, detail="扫描任务不存在")
-    return {"ok": True, "status": st["status"]}
-
-
-@app.get("/api/project/manifest")
-def project_manifest(_: str = Depends(get_operator)):
-    """生成/刷新项目清单 manifest.json，返回清单内容。"""
-    return get_project().write_manifest()
-
-
-@app.get("/api/project/summary")
-def project_summary(_: str = Depends(get_operator)):
-    """项目汇总：底稿明细、分布统计与轻量项目数据概览。"""
-    return get_project().summary()
-
-
-@app.get("/api/search")
-def global_search(q: str = "", _: str = Depends(get_operator)):
-    """全局搜索：单位/底稿/附件按关键字模糊匹配（各类限 20 条）。"""
-    return get_project().search(q)
-
-
 def _close_session_project(ctx: SessionContext, preserve_key: str = "") -> None:
     """关闭指定会话的项目，并释放其项目写入锁。"""
     proj = ctx.project
@@ -656,6 +578,9 @@ app.include_router(build_units_router(get_project, get_operator, _require_projec
 app.include_router(build_issues_router(get_project, get_operator, get_current_context))
 app.include_router(build_exchanges_router(get_project, get_operator))
 app.include_router(build_recycle_router(get_project, get_operator, _require_project_idle))
+app.include_router(build_project_runtime_router(
+    get_project, get_operator, get_current_context, job_runner.submit, job_runner.cancel,
+))
 
 
 # ───────────────────────── 附件 ─────────────────────────
