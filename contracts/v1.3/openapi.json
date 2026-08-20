@@ -3155,6 +3155,54 @@
         "summary": "Update Issue"
       }
     },
+    "/api/issues/{issue_id}/confirmation-docx": {
+      "post": {
+        "description": "导出当前正式底稿的固定模板问题确认单 DOCX。",
+        "operationId": "export_confirmation_docx_api_issues__issue_id__confirmation_docx_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "issue_id",
+            "required": true,
+            "schema": {
+              "title": "Issue Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-session",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Session",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export Confirmation Docx"
+      }
+    },
     "/api/issues/{issue_id}/draft": {
       "delete": {
         "description": "放弃异常恢复草稿；不会改写正式底稿、版本、状态或审计日志。",

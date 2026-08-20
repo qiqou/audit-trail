@@ -778,6 +778,26 @@ export interface paths {
         patch: operations["update_issue_api_issues__issue_id__patch"];
         trace?: never;
     };
+    "/api/issues/{issue_id}/confirmation-docx": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Export Confirmation Docx
+         * @description 导出当前正式底稿的固定模板问题确认单 DOCX。
+         */
+        post: operations["export_confirmation_docx_api_issues__issue_id__confirmation_docx_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/issues/{issue_id}/draft": {
         parameters: {
             query?: never;
@@ -3913,6 +3933,39 @@ export interface operations {
                 "application/json": components["schemas"]["IssueReq"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    export_confirmation_docx_api_issues__issue_id__confirmation_docx_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-session"?: string;
+            };
+            path: {
+                issue_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

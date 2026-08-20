@@ -1509,7 +1509,7 @@ def download_export(filename: str, _: str = Depends(get_operator)):
     out_resolved = (proj.root / OUT_DIR).resolve()
     p = (out_resolved / unquote(filename)).resolve()
     # 防目录穿越：必须落在输出目录内
-    if p.parent != out_resolved or p.suffix.lower() not in {".csv", ".json", ".xlsx", ".zip", ".txt"}:
+    if p.parent != out_resolved or p.suffix.lower() not in {".csv", ".docx", ".json", ".xlsx", ".zip", ".txt"}:
         raise HTTPException(status_code=400, detail="非法文件名")
     if not p.is_file():
         raise HTTPException(status_code=404, detail="文件不存在（可能已被移动）")

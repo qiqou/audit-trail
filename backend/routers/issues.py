@@ -3,6 +3,7 @@
 import time
 import uuid
 from collections.abc import Callable
+from urllib.parse import quote
 
 from api.dependencies import SessionContext
 from api.errors import key_or_value_error
@@ -66,6 +67,22 @@ def build_router(
         if not issue:
             raise HTTPException(status_code=404, detail="底稿不存在")
         return issue
+
+    @router.post("/api/issues/{issue_id}/confirmation-docx")
+    def export_confirmation_docx(issue_id: int, operator: str = Depends(get_operator)):
+        """导出当前正式底稿的固定模板问题确认单 DOCX。"""
+        from export import export_issue_confirmation_docx
+
+        project = get_project()
+        issue = project.get_issue(issue_id)
+        if not issue:
+            raise HTTPException(status_code=404, detail="底稿不存在")
+        unit = project.get_unit(issue["unit_id"])
+        if not unit:
+            raise HTTPException(status_code=404, detail="被审计单位不存在")
+        info = export_issue_confirmation_docx(project, issue, unit["name"])
+        project.log(operator, "导出问题确认单", info["filename"], issue_uuid=str(issue.get("issue_uuid") or ""))
+        return {**info, "download_url": f"/api/export/file/{quote(info['filename'])}"}
 
     @router.get("/api/issues/{issue_id}/draft")
     def get_issue_draft(issue_id: int, _: str = Depends(get_operator)):

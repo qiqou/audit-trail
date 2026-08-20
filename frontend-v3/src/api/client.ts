@@ -1005,6 +1005,10 @@ class ApiClient {
     return this.request(`/api/issues/${issueId}/versions`);
   }
 
+  exportIssueConfirmationDocx(issueId: number): Promise<{ filename: string; download_url: string }> {
+    return this.request(`/api/issues/${issueId}/confirmation-docx`, { method: "POST" });
+  }
+
   restoreVersion(issueId: number, versionId: number): Promise<{ ok: boolean }> {
     return this.request(`/api/issues/${issueId}/versions/${versionId}/restore`, { method: "POST" });
   }

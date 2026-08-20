@@ -19,6 +19,7 @@ import uuid
 import zipfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
+from xml.sax.saxutils import escape
 
 from config import PROJECT_EXT
 from database import ATTACH_DIR, OUT_DIR, SYSTEM_METADATA_NAMES, AuditProject, _now, _safe
@@ -314,6 +315,38 @@ def export_diagnostics_support_package(proj: AuditProject) -> dict:
     with out_path.open("w", encoding="utf-8") as handle:
         json.dump(proj.diagnostics_summary(), handle, ensure_ascii=False, indent=2, sort_keys=True)
         handle.write("\n")
+    return {"filename": out_path.name}
+
+
+def export_issue_confirmation_docx(proj: AuditProject, issue: dict, unit_name: str) -> dict:
+    """生成固定版式的问题确认单 DOCX（标准 OOXML，不依赖本机 Word）。"""
+    def paragraph(text: object, *, bold: bool = False) -> str:
+        content = escape(str(text or "—"))
+        style = "<w:b/>" if bold else ""
+        return f"<w:p><w:r><w:rPr>{style}<w:rFonts w:eastAsia=\"Microsoft YaHei\"/></w:rPr><w:t xml:space=\"preserve\">{content}</w:t></w:r></w:p>"
+
+    def row(label: str, value: object) -> str:
+        return f"<w:tr><w:tc>{paragraph(label, bold=True)}</w:tc><w:tc>{paragraph(value)}</w:tc></w:tr>"
+
+    fields = (
+        ("被审计单位", unit_name), ("问题编号", issue.get("issue_code") or issue.get("seq")),
+        ("所属版块", issue.get("department")), ("问题分类", issue.get("category")),
+        ("问题金额", " ".join(str(issue.get(key) or "") for key in ("amount", "currency", "amount_unit")).strip()),
+        ("编制人 / 审核人", f"{issue.get('author') or '—'} / {issue.get('reviewer') or '—'}"),
+    )
+    body = [paragraph("审计问题确认单", bold=True), "<w:tbl><w:tblPr><w:tblBorders><w:top w:val=\"single\"/><w:left w:val=\"single\"/><w:bottom w:val=\"single\"/><w:right w:val=\"single\"/><w:insideH w:val=\"single\"/><w:insideV w:val=\"single\"/></w:tblBorders></w:tblPr>"]
+    body.extend(row(label, value) for label, value in fields)
+    body.append("</w:tbl>")
+    for label, key in (("问题定性", "defect_type"), ("问题描述", "defect_desc"), ("制度依据", "regulation_basis"), ("审计建议", "suggestion")):
+        body.extend((paragraph(label, bold=True), paragraph(issue.get(key))))
+    document = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>" + "".join(body) + "<w:sectPr/></w:body></w:document>"
+    out_dir = proj.root / OUT_DIR
+    out_dir.mkdir(exist_ok=True)
+    out_path = _unique_path(out_dir, f"问题确认单_{_safe(str(issue.get('issue_code') or issue.get('seq') or ''))}_{_now_ts()}.docx")
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", "<?xml version=\"1.0\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/></Types>")
+        archive.writestr("_rels/.rels", "<?xml version=\"1.0\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>")
+        archive.writestr("word/document.xml", document)
     return {"filename": out_path.name}
 
 
