@@ -5,9 +5,10 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { useRouter } from "vue-router";
 import { storeToRefs } from "pinia";
 
-import { api, type HealthResult, type ProjectInfo, type Unit } from "./api/client";
+import { api, type HealthResult, type ProjectInfo } from "./api/client";
 import { useRuntimeStore } from "./app/runtimeStore";
 import { useSessionStore } from "./app/sessionStore";
+import { useProjectStore } from "./app/projectStore";
 import { APP_VERSION_LABEL } from "./version";
 
 // 项目列表/登录页不需要工作区和低频操作面板，打开项目时才加载，缩短首次启动等待。
@@ -16,7 +17,9 @@ const ProjectOperations = defineAsyncComponent(() => import("./components/Projec
 const router = useRouter();
 const runtimeStore = useRuntimeStore();
 const sessionStore = useSessionStore();
+const projectStore = useProjectStore();
 const { operator } = storeToRefs(sessionStore);
+const { project, units, departments, categories, issueNumberRule } = storeToRefs(projectStore);
 
 type RecentProject = { path: string; name: string; time: number };
 type AutoSaveMode = "realtime" | "5m" | "20m";
@@ -54,11 +57,6 @@ async function refreshRecent(): Promise<void> {
 }
 
 const loginName = ref(operator.value);
-const project = ref<ProjectInfo | null>(null);
-const units = ref<Unit[]>([]);
-const departments = ref<string[]>([]);
-const categories = ref<string[]>([]);
-const issueNumberRule = ref<{ prefix: string; suffix: string }>({ prefix: "", suffix: "" });
 const opening = ref(false);
 const creating = ref(false);
 const projectPath = ref("");
@@ -445,10 +443,7 @@ function handleWorkspaceTool(tool: "templates" | "shortcuts"): void {
 
 async function backToProjectList(force = false): Promise<void> {
   if (!force && workspace.value && !(await workspace.value.confirmCurrentLeave())) return;
-  project.value = null;
-  units.value = [];
-  departments.value = [];
-  categories.value = [];
+  projectStore.clear();
   health.value = null;
   projectPath.value = "";
   projectName.value = "";
@@ -464,10 +459,7 @@ function resetSession(showExpiredMessage = false): void {
   api.clearSession();
   sessionStore.clearOperator();
   if (previousOperator) loginName.value = previousOperator;
-  project.value = null;
-  units.value = [];
-  departments.value = [];
-  categories.value = [];
+  projectStore.clear();
   health.value = null;
   if (showExpiredMessage) ElMessage.warning("本地服务已重启，使用人会话已失效，请重新进入工作台");
 }
