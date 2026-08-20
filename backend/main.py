@@ -64,6 +64,7 @@ from platform_adapter import (
 from platform_adapter import (
     choose_folder as platform_choose_folder,
 )
+from routers.evidence_links import build_router as build_evidence_links_router
 from routers.exchanges import build_router as build_exchanges_router
 from routers.issues import build_router as build_issues_router
 from routers.project_runtime import build_router as build_project_runtime_router
@@ -571,6 +572,7 @@ app.include_router(build_units_router(get_project, get_operator, _require_projec
 app.include_router(build_issues_router(get_project, get_operator, get_current_context))
 app.include_router(build_exchanges_router(get_project, get_operator))
 app.include_router(build_recycle_router(get_project, get_operator, _require_project_idle))
+app.include_router(build_evidence_links_router(get_project, get_operator))
 app.include_router(build_project_runtime_router(
     get_project, get_operator, get_current_context, job_runner.submit, job_runner.cancel,
 ))
@@ -584,12 +586,10 @@ app.include_router(build_projects_router(
 
 # ───────────────────────── 附件 ─────────────────────────
 
-@app.get("/api/units/{unit_id}/files")
 def list_files(unit_id: int, _: str = Depends(get_operator)):
     return get_project().list_files(unit_id)
 
 
-@app.get("/api/units/{unit_id}/files/unlinked")
 def unlinked_files(unit_id: int, _: str = Depends(get_operator)):
     return get_project().unlinked_files(unit_id)
 
@@ -847,7 +847,6 @@ def remove_file(file_id: int, operator: str = Depends(get_operator)):
     return {"ok": True}
 
 
-@app.get("/api/files/{file_id}/issues")
 def issues_for_file(file_id: int, _: str = Depends(get_operator)):
     """反查：附件被哪些底稿引用。"""
     return get_project().issues_for_file(file_id)
@@ -855,14 +854,12 @@ def issues_for_file(file_id: int, _: str = Depends(get_operator)):
 
 # ───────────────────────── 底稿↔附件 关联 ─────────────────────────
 
-@app.get("/api/issues/{issue_id}/files")
 def files_for_issue(issue_id: int, _: str = Depends(get_operator)):
     if not get_project().get_issue(issue_id):
         raise HTTPException(status_code=404, detail="底稿不存在或已移入回收站")
     return get_project().files_for_issue(issue_id)
 
 
-@app.post("/api/issues/{issue_id}/files/{file_id}/link")
 def link_file(issue_id: int, file_id: int, operator: str = Depends(get_operator)):
     try:
         get_project().link_file(issue_id, file_id, operator)
@@ -871,7 +868,6 @@ def link_file(issue_id: int, file_id: int, operator: str = Depends(get_operator)
     return {"ok": True}
 
 
-@app.delete("/api/issues/{issue_id}/files/{file_id}/link")
 def unlink_file(issue_id: int, file_id: int, operator: str = Depends(get_operator)):
     try:
         get_project().unlink_file(issue_id, file_id, operator)
@@ -880,7 +876,6 @@ def unlink_file(issue_id: int, file_id: int, operator: str = Depends(get_operato
     return {"ok": True}
 
 
-@app.post("/api/issues/{issue_id}/files/{file_id}/link-exclusive")
 def link_exclusive(issue_id: int, file_id: int, operator: str = Depends(get_operator)):
     """仅关联到当前问题（独占）：附件移出资料库，其他底稿不可见。"""
     try:
@@ -890,7 +885,6 @@ def link_exclusive(issue_id: int, file_id: int, operator: str = Depends(get_oper
     return {"ok": True}
 
 
-@app.post("/api/files/{file_id}/shared")
 def clear_exclusive(file_id: int, operator: str = Depends(get_operator)):
     """恢复共享：附件回到资料库，其他底稿可继续使用。"""
     try:
