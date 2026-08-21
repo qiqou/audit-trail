@@ -42,6 +42,10 @@ command -v pnpm >/dev/null || fail "未找到 pnpm 11.5.0"
 
 VENV_DIR="$ROOT_DIR/.venv-macos-arm64"
 PYTHON_BIN="$VENV_DIR/bin/python"
+# 某些受管构建环境不允许写入 ~/Library/Application Support；将 PyInstaller 二进制
+# 缓存限定在工作区，避免权限问题且不污染用户目录。
+export PYINSTALLER_CONFIG_DIR="$ROOT_DIR/.pyinstaller-cache"
+mkdir -p "$PYINSTALLER_CONFIG_DIR"
 
 step "创建独立 Python 3.14.6 虚拟环境"
 [[ -x "$PYTHON_BIN" ]] || python3.14 -m venv "$VENV_DIR"

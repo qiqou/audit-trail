@@ -139,6 +139,7 @@ def test_macos_build_script_marks_nonstandard_toolchains_as_candidate_only():
     assert "build-provenance.txt" in script
     assert "candidate-macos" in script
     assert 'PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"' in script
+    assert 'PYINSTALLER_CONFIG_DIR="$ROOT_DIR/.pyinstaller-cache"' in script
 
 
 def test_ci_reads_the_same_instance_endpoint_as_the_application():
