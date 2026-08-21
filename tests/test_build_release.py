@@ -129,6 +129,17 @@ def test_spec_ci_aligned():
     assert ci.count("启动冒烟测试（发布阻断门禁）") == 1
 
 
+def test_macos_build_script_marks_nonstandard_toolchains_as_candidate_only():
+    """新系统可产出内部候选包，但默认正式包门禁不得被悄悄放宽。"""
+    root = Path(__file__).resolve().parent.parent
+    script = (root / "scripts" / "build_macos.sh").read_text(encoding="utf-8")
+    assert 'AUDIT_TRAIL_BUILD_MODE=candidate' in script
+    assert 'OFFICIAL_MACOS_MAJOR="14"' in script
+    assert 'OFFICIAL_NODE_VERSION="24.19.0"' in script
+    assert "build-provenance.txt" in script
+    assert "candidate-macos" in script
+
+
 def test_ci_reads_the_same_instance_endpoint_as_the_application():
     """打包冒烟必须读取当前改造版实际写入的端点文件，不能沿用 v1.1 默认名。"""
     root = Path(__file__).resolve().parent.parent

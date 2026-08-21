@@ -13,4 +13,4 @@
 - 不启用 Python free-threaded 或 JIT 实验构建；SQLite 单项目单写模型并不从中获益。
 - 用户实际使用的是打包后的离线程序；Node 仅参与研发和发布构建。
 - 每次修改版本声明，必须同时通过 `scripts/check_runtime_matrix.py`；该检查覆盖版本文件、前端 package、CI 及双端构建脚本。
-- 本机当前为 macOS 27、Node 26.5.0，不是发布目标环境。因此本机可执行代码级门禁，但不能替代 macOS 14 / Node 24.19.0 或 Windows x64 的发布包验收。
+- `scripts/build_macos.sh` 默认只接受 macOS 14 / Node 24.19.0，生成正式发布包。显式设置 `AUDIT_TRAIL_BUILD_MODE=candidate` 后，可在更高版本 macOS/Node 生成文件名带 `candidate` 的内部候选包，并记录 `dist/build-provenance.txt`；该候选包不能替代 macOS 14 / Node 24.19.0 或 Windows x64 的发布包验收。
