@@ -1,6 +1,7 @@
 # Python
 .venv/
 .venv-*/
+.pyinstaller-cache/
 __pycache__/
 *.pyc
 *.pyo
