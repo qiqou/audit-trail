@@ -28,7 +28,7 @@ mark_candidate() {
 MACOS_VERSION="$(sw_vers -productVersion)"
 MACOS_MAJOR="${MACOS_VERSION%%.*}"
 [[ "$MACOS_MAJOR" -ge "$OFFICIAL_MACOS_MAJOR" ]] || fail "构建机至少需要 macOS $OFFICIAL_MACOS_MAJOR"
-[[ "$MACOS_MAJOR" == "$OFFICIAL_MACOS_MAJOR" ]] || mark_candidate "当前 macOS $MACOS_VERSION，不是正式验证环境 macOS $OFFICIAL_MACOS_MAJOR"
+[[ "$MACOS_MAJOR" == "$OFFICIAL_MACOS_MAJOR" ]] || mark_candidate "当前 macOS ${MACOS_VERSION}，不是正式验证环境 macOS ${OFFICIAL_MACOS_MAJOR}"
 [[ "$(uname -m)" == "arm64" ]] || fail "发布包仅支持 Apple Silicon（arm64）"
 
 command -v python3.14 >/dev/null || fail "未找到 Python 3.14.6"
@@ -36,7 +36,7 @@ PYVER=$(python3.14 -c 'import sys; print(".".join(map(str, sys.version_info[:2])
 [[ "$PYVER" == "3.14" ]] || fail "需要 Python 3.14.x（当前 $PYVER）"
 command -v node >/dev/null || fail "未找到 Node.js $OFFICIAL_NODE_VERSION"
 NODE_VERSION="$(node --version | sed 's/^v//')"
-[[ "$NODE_VERSION" == "$OFFICIAL_NODE_VERSION" ]] || mark_candidate "当前 Node.js $NODE_VERSION，不是锁定构建版本 $OFFICIAL_NODE_VERSION"
+[[ "$NODE_VERSION" == "$OFFICIAL_NODE_VERSION" ]] || mark_candidate "当前 Node.js ${NODE_VERSION}，不是锁定构建版本 ${OFFICIAL_NODE_VERSION}"
 command -v pnpm >/dev/null || fail "未找到 pnpm 11.5.0"
 [[ "$(pnpm --version)" == "11.5.0" ]] || fail "需要 pnpm 11.5.0"
 
