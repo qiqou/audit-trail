@@ -138,6 +138,7 @@ def test_macos_build_script_marks_nonstandard_toolchains_as_candidate_only():
     assert 'OFFICIAL_NODE_VERSION="24.19.0"' in script
     assert "build-provenance.txt" in script
     assert "candidate-macos" in script
+    assert 'PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"' in script
 
 
 def test_ci_reads_the_same_instance_endpoint_as_the_application():

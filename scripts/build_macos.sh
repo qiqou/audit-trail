@@ -57,7 +57,7 @@ pnpm --dir frontend-v3 build
 
 step "执行质量门禁"
 "$VENV_DIR/bin/ruff" check .
-"$VENV_DIR/bin/pytest" tests/ -q --disable-warnings
+PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" "$VENV_DIR/bin/pytest" tests/ -q --disable-warnings
 
 step "PyInstaller 打包 Apple Silicon 应用"
 "$VENV_DIR/bin/pyinstaller" --noconfirm 审迹.spec
