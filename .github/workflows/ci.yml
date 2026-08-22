@@ -29,6 +29,9 @@ jobs:
           python -m pip install --require-hashes -r requirements-dev.txt
       - name: 静态检查（ruff）
         run: ruff check .
+      - name: 构建 V3 前端（生产构建）
+        # 必须先于 pytest：API/契约测试要求前端构建产物存在（conftest 校验）
+        run: pnpm --dir frontend-v3 build
       - name: 回归测试（pytest）
         run: pytest tests/ -q --disable-warnings
       - name: OpenAPI 合同与前端类型检查
@@ -39,8 +42,6 @@ jobs:
         run: |
           pnpm --dir frontend-v3 lint
           pnpm --dir frontend-v3 test:logic
-      - name: 构建 V3 前端（生产构建）
-        run: pnpm --dir frontend-v3 build
       - name: 依赖安全审计
         run: |
           pip-audit -r requirements.txt

@@ -9,6 +9,13 @@ from pathlib import Path
 
 import pytest
 
+# 项目根加入 sys.path：让 test_contract_snapshot 等导入 scripts/* 的测试
+# 不依赖 `python -m pytest`（console script 方式不会把 cwd 加入 sys.path）。
+# 注意：backend 必须排在 root 之前——root 下也有 main.py（启动器），
+# 而测试期望 `import main` 解析到 backend/main.py。
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 BACKEND_DIR = Path(__file__).resolve().parent.parent / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
