@@ -2225,6 +2225,14 @@ class AuditProject:
         except ValueError as exc:
             raise ValueError("截止日格式应为 YYYY-MM-DD") from exc
 
+    # ───────────────────────── 项目级资料请求（v1.4 预留） ─────────────────────────
+    # v1.3 范围调整（2026-08-20）剔除项目级资料请求台账，本段数据层能力无 API 路由，
+    # 前端 /api/meta 亦声明 project_material_requests=False。
+    # 保留原因：① 合并导入（export.py merge）需读取源备份的 project_requests 数据兼容迁移；
+    #           ② 数据层 CRUD 有 tests/test_database_crud.py、tests/test_merge_conflicts.py 覆盖，
+    #              供 v1.4 台账功能直接复用。
+    # 注意：v1.3 不新增 UI 入口，本段方法不得被 routers 引用。
+
     def list_project_requests(self) -> list[dict]:
         rows = self._conn.execute(
             """SELECT r.*, u.name AS unit_name, i.seq AS issue_seq, i.defect_type AS issue_type,

@@ -1,4 +1,10 @@
-/** 富文本编辑器的纯函数：可在无 DOM 的逻辑测试中验证。 */
+/**
+ * 富文本编辑器的纯函数：可在无 DOM 的逻辑测试中验证。
+ *
+ * v1.4 预留（2026-08-20 范围调整）：v1.3 正式剔除富文本功能，此模块保留
+ * 纯文本提取/字数/HTML 转义规范，供 v1.4 富文本编辑器与只读渲染复用；
+ * 当前无 UI 调用方，仅由 richText.test.ts 覆盖。
+ */
 
 export function richTextToPlainText(value: string): string {
   return value
