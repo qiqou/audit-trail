@@ -4,7 +4,6 @@ import { ElMessage, ElMessageBox } from "element-plus";
 
 import { api, type Issue, type IssueChanges, type IssuePatch, type IssueStatus, type Unit } from "../api/client";
 import { formatIssueNo } from "../format";
-import ReviewNotes from "./ReviewNotes.vue";
 import VersionHistory from "./VersionHistory.vue";
 
 type AutoSaveMode = "realtime" | "5m" | "20m";
@@ -337,16 +336,6 @@ async function openVersionHistory(): Promise<void> {
   await versionHistory.value?.open();
 }
 
-async function exportConfirmationDocx(): Promise<void> {
-  try {
-    const result = await api.exportIssueConfirmationDocx(props.issue.id);
-    window.open(result.download_url, "_blank", "noopener,noreferrer");
-    ElMessage.success("问题确认单已生成；请在真实 Word 中核对中文、表格和分页");
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "生成问题确认单失败，请重试");
-  }
-}
-
 async function prepareVersionRestore(): Promise<boolean> {
   return persist(false);
 }
@@ -471,9 +460,8 @@ defineExpose({ confirmLeave, hasUnsavedChanges, openDuplicateDialog, openVersion
     <div class="form-grid author-reviewer"><label>编制人<el-input v-model="draft.author" :disabled="isArchived" /></label><label>审核人<el-input v-model="draft.reviewer" :disabled="isArchived" /></label></div>
     <div class="editor-footer">
       <span :class="{ 'editor-dirty': dirty }">{{ saveStateText }}</span>
-      <div class="editor-footer-actions"><VersionHistory ref="versionHistory" :issue="issue" :before-restore="prepareVersionRestore" :trigger-visible="false" @restored="(fresh) => emit('updated', fresh)" /><el-button size="small" @click="exportConfirmationDocx">确认单 DOCX</el-button><span class="status-actions footer-status-actions"><el-button v-for="target in allowed" :key="target" size="small" :loading="saving" :type="target === '已归档' ? 'info' : target === '已复核' ? 'success' : target === '复核退回' ? 'warning' : 'primary'" @click="transition(target)">{{ issue.status === '已归档' && target === '编制完成' ? '归档后编辑' : target }}</el-button></span><el-button size="small" type="primary" :disabled="isArchived" :loading="saving" @click="save">保存</el-button></div>
+      <div class="editor-footer-actions"><VersionHistory ref="versionHistory" :issue="issue" :before-restore="prepareVersionRestore" :trigger-visible="false" @restored="(fresh) => emit('updated', fresh)" /><span class="status-actions footer-status-actions"><el-button v-for="target in allowed" :key="target" size="small" :loading="saving" :type="target === '已归档' ? 'info' : target === '已复核' ? 'success' : target === '复核退回' ? 'warning' : 'primary'" @click="transition(target)">{{ issue.status === '已归档' && target === '编制完成' ? '归档后编辑' : target }}</el-button></span><el-button size="small" type="primary" :disabled="isArchived" :loading="saving" @click="save">保存</el-button></div>
     </div>
-    <ReviewNotes :issue="issue" />
     <el-dialog v-model="duplicateVisible" title="复制为新底稿" width="min(480px, calc(100vw - 32px))" append-to-body>
       <div class="duplicate-panel">
         <p>将复制当前底稿的正文和元数据为新草稿。可选择任意被审计单位；附件、版本、状态和交流记录不会复制。</p>

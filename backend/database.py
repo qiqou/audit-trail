@@ -2419,7 +2419,11 @@ class AuditProject:
         with self._lock, self._conn:
             return self._conn.execute("DELETE FROM issue_drafts WHERE issue_id=?", (issue_id,)).rowcount > 0
 
-    # ───────────────────────── 内部复核意见（不可变事件） ─────────────────────────
+    # ───────────────────────── 内部复核意见（v1.4 预留） ─────────────────────────
+    # 2026-08-22 下线：v1.3 移除内部复核意见的 API 路由与前端入口，本段数据层
+    # 能力保留。review_note_events 表在 v18 迁移中已建，升级后的既有项目可能含数据；
+    # 数据层测试（tests/test_review_notes.py）继续覆盖。v1.4 恢复入口时复用。
+    # 注意：v1.3 不得新增 routers 引用。
 
     def list_review_notes(self, issue_id: int) -> list[dict]:
         """按意见聚合不可变事件，并显示其是否仍锚定当前正式版本。"""

@@ -778,26 +778,6 @@ export interface paths {
         patch: operations["update_issue_api_issues__issue_id__patch"];
         trace?: never;
     };
-    "/api/issues/{issue_id}/confirmation-docx": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Export Confirmation Docx
-         * @description 导出当前正式底稿的固定模板问题确认单 DOCX。
-         */
-        post: operations["export_confirmation_docx_api_issues__issue_id__confirmation_docx_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/issues/{issue_id}/draft": {
         parameters: {
             query?: never;
@@ -915,30 +895,6 @@ export interface paths {
          * @description 仅关联到当前问题（独占）：附件移出资料库，其他底稿不可见。
          */
         post: operations["link_exclusive_api_issues__issue_id__files__file_id__link_exclusive_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/issues/{issue_id}/review-notes": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Review Notes
-         * @description 读取内部复核意见及其不可变事件；意见始终锚定创建时的正式版本。
-         */
-        get: operations["list_review_notes_api_issues__issue_id__review_notes_get"];
-        put?: never;
-        /**
-         * Create Review Note
-         * @description 提出内部复核意见；不改写正式底稿、状态或交流记录。
-         */
-        post: operations["create_review_note_api_issues__issue_id__review_notes_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1472,66 +1428,6 @@ export interface paths {
         put?: never;
         /** Restore Recycled Unit */
         post: operations["restore_recycled_unit_api_recycle_units__recycle_id__restore_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/review-notes/{note_uuid}/reopen": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Reopen Review Note
-         * @description 重新打开已清除的内部复核意见；保留完整事件链。
-         */
-        post: operations["reopen_review_note_api_review_notes__note_uuid__reopen_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/review-notes/{note_uuid}/reply": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Reply Review Note
-         * @description 回复开放中的内部复核意见，保留原意见和全部历史回复。
-         */
-        post: operations["reply_review_note_api_review_notes__note_uuid__reply_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/review-notes/{note_uuid}/resolve": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Resolve Review Note
-         * @description 清除开放中的内部复核意见；动作追加为事件而非覆盖原意见。
-         */
-        post: operations["resolve_review_note_api_review_notes__note_uuid__resolve_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2343,29 +2239,6 @@ export interface components {
         ResetReq: {
             /** Confirm Text */
             confirm_text: string;
-        };
-        /** ReviewNoteCreateReq */
-        ReviewNoteCreateReq: {
-            /**
-             * Anchor Field
-             * @default
-             */
-            anchor_field: string;
-            /**
-             * Base Version Id
-             * @default 0
-             */
-            base_version_id: number;
-            /** Body */
-            body: string;
-        };
-        /** ReviewNoteEventReq */
-        ReviewNoteEventReq: {
-            /**
-             * Body
-             * @default
-             */
-            body: string;
         };
         /** StatusReq */
         StatusReq: {
@@ -3954,39 +3827,6 @@ export interface operations {
             };
         };
     };
-    export_confirmation_docx_api_issues__issue_id__confirmation_docx_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-session"?: string;
-            };
-            path: {
-                issue_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     get_issue_draft_api_issues__issue_id__draft_get: {
         parameters: {
             query?: never;
@@ -4274,76 +4114,6 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    list_review_notes_api_issues__issue_id__review_notes_get: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-session"?: string;
-            };
-            path: {
-                issue_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    create_review_note_api_issues__issue_id__review_notes_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-session"?: string;
-            };
-            path: {
-                issue_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ReviewNoteCreateReq"];
-            };
-        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -5338,117 +5108,6 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    reopen_review_note_api_review_notes__note_uuid__reopen_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-session"?: string;
-            };
-            path: {
-                note_uuid: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ReviewNoteEventReq"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    reply_review_note_api_review_notes__note_uuid__reply_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-session"?: string;
-            };
-            path: {
-                note_uuid: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ReviewNoteEventReq"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    resolve_review_note_api_review_notes__note_uuid__resolve_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-session"?: string;
-            };
-            path: {
-                note_uuid: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ReviewNoteEventReq"];
-            };
-        };
         responses: {
             /** @description Successful Response */
             200: {

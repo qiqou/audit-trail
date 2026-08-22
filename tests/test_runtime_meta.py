@@ -15,7 +15,8 @@ def test_runtime_meta_exposes_supported_v13_capabilities():
         "schema_version": SCHEMA_VERSION,
         "capabilities": {
             "draft_recovery": True,
-            "review_notes": True,
+            "review_notes": False,
+            "confirmation_docx": False,
             "unit_ordering": True,
             "issue_ordering": True,
             "rich_text_editor": False,

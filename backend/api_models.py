@@ -118,12 +118,16 @@ class IssueDraftReq(BaseModel):
 
 
 class ReviewNoteCreateReq(BaseModel):
+    """内部复核意见创建请求。v1.4 预留（2026-08-22 下线 API 路由）。"""
+
     body: str
     anchor_field: str = ""
     base_version_id: int = 0
 
 
 class ReviewNoteEventReq(BaseModel):
+    """内部复核意见事件请求。v1.4 预留（2026-08-22 下线 API 路由）。"""
+
     body: str = ""
 
 

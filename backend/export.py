@@ -230,7 +230,11 @@ def export_diagnostics_support_package(proj: AuditProject) -> dict:
 
 
 def export_issue_confirmation_docx(proj: AuditProject, issue: dict, unit_name: str) -> dict:
-    """生成固定版式的问题确认单 DOCX（标准 OOXML，不依赖本机 Word）。"""
+    """生成固定版式的问题确认单 DOCX（标准 OOXML，不依赖本机 Word）。
+
+    v1.4 预留（2026-08-22 下线）：v1.3 移除确认单 DOCX 的 API 路由与前端入口，
+    本写入器保留；tests/test_confirmation_docx.py 直接覆盖数据层。
+    """
     out_dir = proj.root / OUT_DIR
     out_dir.mkdir(exist_ok=True)
     out_path = _unique_path(out_dir, f"问题确认单_{_safe(str(issue.get('issue_code') or issue.get('seq') or ''))}_{_now_ts()}.docx")

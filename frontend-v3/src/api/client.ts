@@ -176,36 +176,6 @@ export interface IssueDraftState {
   current_updated_at: string;
 }
 
-export type ReviewNoteEventType = "created" | "replied" | "resolved" | "reopened";
-
-export interface ReviewNoteEvent {
-  event_uuid: string;
-  note_uuid: string;
-  issue_id: number;
-  issue_uuid: string;
-  base_version_id: number;
-  anchor_field: string;
-  event_seq: number;
-  event_type: ReviewNoteEventType;
-  body: string;
-  created_by: string;
-  created_at: string;
-}
-
-export interface ReviewNote {
-  note_uuid: string;
-  issue_id: number;
-  issue_uuid: string;
-  base_version_id: number;
-  anchor_field: string;
-  created_by: string;
-  created_at: string;
-  body: string;
-  status: "open" | "resolved";
-  is_stale: boolean;
-  events: ReviewNoteEvent[];
-}
-
 export interface WorkpaperTemplate {
   id: number;
   template_uuid: string;
@@ -854,28 +824,6 @@ class ApiClient {
     return this.request(`/api/issues/${issueId}/draft`, { method: "DELETE" });
   }
 
-  reviewNotes(issueId: number): Promise<ReviewNote[]> {
-    return this.request(`/api/issues/${issueId}/review-notes`);
-  }
-
-  createReviewNote(
-    issueId: number, body: string, baseVersionId: number, anchorField = "",
-  ): Promise<ReviewNote> {
-    return this.request(`/api/issues/${issueId}/review-notes`, {
-      method: "POST",
-      body: JSON.stringify({ body, base_version_id: baseVersionId, anchor_field: anchorField }),
-    });
-  }
-
-  appendReviewNoteEvent(
-    noteUuid: string, eventType: Exclude<ReviewNoteEventType, "created">, body = "",
-  ): Promise<ReviewNote> {
-    return this.request(`/api/review-notes/${noteUuid}/${eventType === "replied" ? "reply" : eventType === "resolved" ? "resolve" : "reopen"}`, {
-      method: "POST",
-      body: JSON.stringify({ body }),
-    });
-  }
-
   startExchange(issueId: number): Promise<ExchangeSession> {
     return this.request(`/api/issues/${issueId}/exchange`, { method: "POST" });
   }
@@ -982,10 +930,6 @@ class ApiClient {
 
   versions(issueId: number): Promise<IssueVersion[]> {
     return this.request(`/api/issues/${issueId}/versions`);
-  }
-
-  exportIssueConfirmationDocx(issueId: number): Promise<{ filename: string; download_url: string }> {
-    return this.request(`/api/issues/${issueId}/confirmation-docx`, { method: "POST" });
   }
 
   restoreVersion(issueId: number, versionId: number): Promise<{ ok: boolean }> {

@@ -25,7 +25,10 @@ def build_router(
             "schema_version": SCHEMA_VERSION,
             "capabilities": {
                 "draft_recovery": True,
-                "review_notes": True,
+                # 2026-08-22 下线：内部复核意见与确认单 DOCX 移入 v1.4 候选池，
+                # API 路由已移除；数据层与迁移表保留。前端据此隐藏入口。
+                "review_notes": False,
+                "confirmation_docx": False,
                 "unit_ordering": True,
                 "issue_ordering": True,
                 "rich_text_editor": False,
